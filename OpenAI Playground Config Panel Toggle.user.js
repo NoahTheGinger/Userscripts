@@ -6,6 +6,7 @@
 // @author       NoahTheGinger
 // @match        https://platform.openai.com/playground/*
 // @grant        none
+// @license      MIT
 // ==/UserScript==
 
 (function() {
