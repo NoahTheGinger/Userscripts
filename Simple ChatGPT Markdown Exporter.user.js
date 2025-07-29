@@ -10,6 +10,7 @@
 // @match        https://chatgpt.com/g/*/c/*
 // @grant        none
 // @require      https://cdn.jsdelivr.net/npm/sentinel-js@0.0.7/dist/sentinel.min.js
+// @license      MIT
 // ==/UserScript==
 
 (function() {
