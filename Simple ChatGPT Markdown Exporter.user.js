@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         Simple ChatGPT Markdown Exporter
 // @namespace    https://github.com/NoahTheGinger/Userscripts/
-// @version      1.2
-// @description  A lightweight userscript to export ChatGPT conversations, including model thoughts, to a clean Markdown file.
-// @author       NoahTheGinger & Gemini 2.5 Pro
+// @version      1.4
+// @description  Export ChatGPT conversations (incl. thoughts, tool calls & custom instructions) to clean Markdown.
+// @author       NoahTheGinger
+// @note         Original development assistance from Gemini 2.5 Pro in AI Studio, and a large logic fix for tool calls by o3 (high reasoning effort) in OpenAI's Chat Playground
 // @match        https://chat.openai.com/c/*
 // @match        https://chat.openai.com/g/*/c/*
 // @match        https://chatgpt.com/c/*
@@ -13,273 +14,226 @@
 // @license      MIT
 // ==/UserScript==
 
-(function() {
-    'use strict';
+(function () {
+  'use strict';
 
-    // --- 1. API and Data Fetching Logic ---
+  /* ---------- 1. authentication & fetch ---------- */
 
-    /**
-     * Retrieves the authentication token for the API.
-     * @returns {Promise<string>} The access token.
-     */
-    async function getAccessToken() {
-        const resp = await fetch('/api/auth/session');
-        if (!resp.ok) {
-            throw new Error('Failed to fetch session. You may need to log in again.');
-        }
-        const data = await resp.json();
-        if (!data.accessToken) {
-            throw new Error('Could not find access token in session.');
-        }
-        return data.accessToken;
+  async function getAccessToken() {
+    const r = await fetch('/api/auth/session');
+    if (!r.ok) throw new Error('Not authorised – log-in again');
+    const j = await r.json();
+    if (!j.accessToken) throw new Error('No access token');
+    return j.accessToken;
+  }
+
+  function getChatIdFromUrl() {
+    const m = location.pathname.match(/\/c\/([a-zA-Z0-9-]+)/);
+    return m ? m[1] : null;
+  }
+
+  async function fetchConversation(id) {
+    const token = await getAccessToken();
+    const resp = await fetch(`${location.origin}/backend-api/conversation/${id}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!resp.ok) throw new Error(resp.statusText);
+    return resp.json();
+  }
+
+  /* ---------- 2. processing & markdown ---------- */
+
+  function processConversation(raw) {
+    const title = raw.title || 'ChatGPT Conversation';
+    const nodes = [];
+    let cur = raw.current_node;
+    while (cur) {
+      const n = raw.mapping[cur];
+      if (n && n.message && n.message.author?.role !== 'system') nodes.unshift(n);
+      cur = n?.parent;
+    }
+    return { title, nodes };
+  }
+
+  /* message --> markdown */
+  function transformMessage(msg) {
+    if (!msg || !msg.content) return '';
+    const { content, metadata, author } = msg;
+
+    switch (content.content_type) {
+      case 'text':
+        return content.parts?.join('\n') || '';
+
+      case 'code': { // tool-call or normal snippet
+        const raw = content.text || '';
+        const looksJson = raw.trim().startsWith('{') && raw.trim().endsWith('}');
+        const lang =
+          content.language ||
+          metadata?.language ||
+          (looksJson ? 'json' : '') ||
+          'txt';
+
+        const header = looksJson ? '**Tool Call:**\n' : '';
+        return `${header}\`\`\`${lang}\n${raw}\n\`\`\``;
+      }
+
+      case 'thoughts':
+        return content.thoughts
+          .map(
+            t =>
+              `**${t.summary}**\n\n> ${t.content.replace(/\n/g, '\n> ')}`
+          )
+          .join('\n\n');
+
+      case 'multimodal_text':
+        return (
+          content.parts
+            ?.map(p => {
+              if (typeof p === 'string') return p;
+              if (p.content_type === 'image_asset_pointer') return '![Image]';
+              if (p.content_type === 'code')
+                return `\`\`\`\n${p.text || ''}\n\`\`\``;
+              return `[Unsupported: ${p.content_type}]`;
+            })
+            .join('\n') || ''
+        );
+
+      /* noise we always skip */
+      case 'model_editable_context':
+      case 'reasoning_recap':
+        return '';
+      default:
+        return `[Unsupported content type: ${content.content_type}]`;
+    }
+  }
+
+  /* whole conversation --> markdown */
+  function conversationToMarkdown({ title, nodes }) {
+    let md = `# ${title}\n\n`;
+
+    /* prepend custom instructions (user_editable_context) --------- */
+    const idx = nodes.findIndex(
+      n => n.message?.content?.content_type === 'user_editable_context'
+    );
+    if (idx > -1) {
+      const ctx = nodes[idx].message.content;
+      md += '#### User Editable Context:\n\n';
+      if (ctx.user_profile)
+        md += `**About User:**\n\`\`\`\n${ctx.user_profile}\n\`\`\`\n\n`;
+      if (ctx.user_instructions)
+        md += `**About GPT:**\n\`\`\`\n${ctx.user_instructions}\n\`\`\`\n\n`;
+      md += '---\n\n';
+      nodes.splice(idx, 1); // remove so we don’t re-process it
     }
 
-    /**
-     * Gets the current conversation ID from the URL, supporting both standard and Custom GPT chats.
-     * @returns {string|null} The chat ID or null if not found.
-     */
-    function getChatIdFromUrl() {
-        // This regex finds the UUID following "/c/" regardless of what precedes it (e.g., "/g/.../").
-        const match = window.location.pathname.match(/\/c\/([a-zA-Z0-9-]+)/);
-        return match ? match[1] : null;
-    }
+    /* main loop --------------------------------------------------- */
+    for (let i = 0; i < nodes.length; ) {
+      const n = nodes[i];
+      const m = n.message;
+      if (!m || m.recipient !== 'all') {
+        i++;
+        continue;
+      }
 
-    /**
-     * Fetches the full conversation data from the API.
-     * @param {string} chatId The ID of the conversation to fetch.
-     * @returns {Promise<object>} The raw conversation data.
-     */
-    async function fetchConversation(chatId) {
-        const accessToken = await getAccessToken();
-        const apiUrl = new URL(location.href).origin;
-        const response = await fetch(`${apiUrl}/backend-api/conversation/${chatId}`, {
-            headers: { 'Authorization': `Bearer ${accessToken}` }
-        });
+      if (m.author.role === 'user') {
+        md += `#### User:\n\n${transformMessage(m)}\n\n---\n\n`;
+        i++;
+        continue;
+      }
 
-        if (!response.ok) {
-            throw new Error(`Network response was not ok: ${response.statusText}`);
-        }
-        return response.json();
-    }
-
-    // --- 2. Data Processing and Markdown Conversion ---
-
-    /**
-     * Processes the raw API data into a structured format.
-     * @param {object} rawData - The raw conversation data from the API.
-     * @returns {{title: string, conversationNodes: Array<object>}}
-     */
-    function processConversation(rawData) {
-        const title = rawData.title || 'ChatGPT Conversation';
-        const startNodeId = rawData.current_node;
-        if (!startNodeId) throw new Error('Failed to find the starting node of the conversation.');
-
-        const conversationNodes = [];
-        let currentNodeId = startNodeId;
-        while (currentNodeId) {
-            const node = rawData.mapping[currentNodeId];
-            // Exclude system messages, which are not part of the visible conversation
-            if (!node || !node.message || node.message.author?.role === 'system') {
-                currentNodeId = node?.parent;
-                continue;
-            }
-            conversationNodes.unshift(node);
-            currentNodeId = node.parent;
-        }
-
-        return { title, conversationNodes };
-    }
-
-    /**
-     * Converts a message's content object to a Markdown string.
-     * @param {object} content - The content object from a message.
-     * @param {object} metadata - The metadata object for the message.
-     * @returns {string} The formatted content string.
-     */
-    function transformContent(content, metadata) {
-        if (!content) return '[No content]';
-
-        switch (content.content_type) {
-            case 'text':
-                return content.parts?.join('\n') || '';
-            case 'code':
-                const language = metadata?.language || '';
-                return '```' + language + '\n' + (content.text || '') + '\n```';
-            case 'thoughts':
-                if (!content.thoughts || content.thoughts.length === 0) return '';
-                let thoughtsMarkdown = '<details>\n<summary>View Thoughts</summary>\n\n';
-                content.thoughts.forEach(thought => {
-                    const summary = thought.summary.replace(/</g, '<').replace(/>/g, '>');
-                    const thoughtContent = thought.content.replace(/\n/g, '\n> '); // Blockquote the content
-                    thoughtsMarkdown += `**${summary}**\n\n> ${thoughtContent}\n\n`;
-                });
-                thoughtsMarkdown += '</details>';
-                return thoughtsMarkdown;
-            case 'reasoning_recap':
-                return ''; // Ignore the "Thought for X seconds" message for a cleaner export.
-            case 'multimodal_text':
-                return (content.parts?.map(part => {
-                    if (typeof part === 'string') return part;
-                    if (part.content_type === 'image_asset_pointer') return '![Image]';
-                    if (part.content_type === 'code') return '```\n' + (part.text || '') + '\n```';
-                    return `[Unsupported content: ${part.content_type}]`;
-                }).join('\n')) || '';
-            default:
-                return `[Unsupported content type: ${content.content_type}]`;
-        }
-    }
-
-    /**
-     * Converts the entire processed conversation into a single Markdown string.
-     * @param {object} conversation - The processed conversation object.
-     * @returns {string} The complete conversation in Markdown format.
-     */
-    function conversationToMarkdown(conversation) {
-        const { title, conversationNodes } = conversation;
-        let markdown = `# ${title}\n\n`;
-        let i = 0;
-
-        while (i < conversationNodes.length) {
-            const node = conversationNodes[i];
-            const message = node.message;
-
-            if (!message || message.recipient !== 'all') {
-                i++;
-                continue;
-            }
-
-            const authorRole = message.author.role;
-
-            if (authorRole === 'user') {
-                const content = transformContent(message.content, message.metadata);
-                markdown += `#### User:\n\n${content}\n\n---\n\n`;
-                i++;
-            } else if (authorRole === 'assistant') {
-                markdown += `#### Assistant:\n\n`;
-                // An assistant's turn can be multiple messages (thoughts, then final response).
-                // We loop to gather all parts of this single turn.
-                let turnEnded = false;
-                while (i < conversationNodes.length && !turnEnded) {
-                    const assistantNode = conversationNodes[i];
-                    const assistantMessage = assistantNode.message;
-
-                    if (!assistantMessage || assistantMessage.author.role !== 'assistant') {
-                        break; // Moved to the next user turn
-                    }
-
-                    const content = transformContent(assistantMessage.content, assistantMessage.metadata);
-                    if (content) {
-                        markdown += `${content}\n\n`;
-                    }
-
-                    turnEnded = assistantMessage.end_turn;
-                    i++;
-                }
-                markdown += `---\n\n`;
-            } else {
-                // Skip other roles like 'tool' for this simplified script
-                i++;
-            }
+      if (m.author.role === 'assistant') {
+        /* gather reasoning (thoughts & tool-call code) ------------- */
+        if (m.content.content_type !== 'text') {
+          md += '#### Thoughts:\n\n';
+          while (
+            i < nodes.length &&
+            ['assistant', 'tool'].includes(nodes[i].message.author.role) &&
+            nodes[i].message.content.content_type !== 'text'
+          ) {
+            const chunk = transformMessage(nodes[i].message);
+            if (chunk) md += `${chunk}\n\n`;
+            i++;
+          }
+          md += '---\n\n';
+          continue;
         }
 
-        return markdown;
+        /* final assistant reply ------------------------------------ */
+        md += `#### Assistant:\n\n${transformMessage(m)}\n\n---\n\n`;
+        i++;
+        continue;
+      }
+
+      /* tool messages that slipped through and weren’t handled */
+      if (m.author.role === 'tool') {
+        const chunk = transformMessage(m);
+        if (chunk) md += `#### Thoughts:\n\n${chunk}\n\n---\n\n`;
+      }
+      i++;
     }
 
+    return md.trimEnd();
+  }
 
-    // --- 3. UI and Export Trigger ---
+  /* ---------- 3. UI / download ---------- */
 
-    /**
-     * Sanitizes a string for use as a filename, preserving spaces.
-     * @param {string} name - The string to sanitize.
-     * @returns {string} The sanitized filename.
-     */
-    function sanitizeFilename(name) {
-        // Remove characters that are invalid in filenames on most OSes.
-        return name.replace(/[\/\?<>\\:\*\|"]/g, '-');
+  const sanitizeFilename = s => s.replace(/[\/\\?<>:*|"]/g, '-');
+
+  function downloadFile(name, data) {
+    const url = URL.createObjectURL(
+      new Blob([data], { type: 'text/markdown;charset=utf-8' })
+    );
+    const a = Object.assign(document.createElement('a'), {
+      href: url,
+      download: name
+    });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  /* export action */
+  async function handleExport() {
+    const btn = document.getElementById('simplified-markdown-exporter-button');
+    if (btn) {
+      btn.textContent = 'Exporting...';
+      btn.disabled = true;
     }
-
-    /**
-     * Triggers the download of a file.
-     * @param {string} filename - The desired name of the file.
-     * @param {string} content - The content of the file.
-     */
-    function downloadFile(filename, content) {
-        const blob = new Blob([content], { type: 'text/markdown;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
+    try {
+      const id = getChatIdFromUrl();
+      if (!id) return alert('No conversation ID found.');
+      const raw = await fetchConversation(id);
+      const md = conversationToMarkdown(processConversation(raw));
+      downloadFile(`${sanitizeFilename(raw.title)}.md`, md);
+    } catch (e) {
+      console.error(e);
+      alert('Export failed – see console.');
+    } finally {
+      if (btn) {
+        btn.textContent = 'Export Markdown';
+        btn.disabled = false;
+      }
     }
+  }
 
-    /**
-     * The main function to handle the export process.
-     */
-    async function handleExport() {
-        const button = document.getElementById('simplified-markdown-exporter-button');
-        if (button) {
-            button.textContent = 'Exporting...';
-            button.disabled = true;
-        }
+  /* button */
+  function createButton() {
+    const b = document.createElement('button');
+    b.id = 'simplified-markdown-exporter-button';
+    b.textContent = 'Export Markdown';
+    b.className = 'btn relative btn-neutral';
+    b.style.margin = '0 8px';
+    b.addEventListener('click', handleExport);
+    return b;
+  }
 
-        try {
-            const chatId = getChatIdFromUrl();
-            if (!chatId) {
-                alert('Could not find conversation ID. Please ensure you are inside a chat.');
-                return;
-            }
+  function init() {
+    sentinel.on('form > div > div:last-child > div', div => {
+      if (!document.getElementById('simplified-markdown-exporter-button'))
+        div.appendChild(createButton());
+    });
+  }
 
-            const rawData = await fetchConversation(chatId);
-            const processedData = processConversation(rawData);
-            const markdownContent = conversationToMarkdown(processedData);
-            const filename = `${sanitizeFilename(processedData.title)}.md`;
-            downloadFile(filename, markdownContent);
-
-        } catch (error) {
-            console.error('ChatGPT Markdown Exporter Error:', error);
-            alert(`Failed to export conversation: ${error.message}. Check the console for more details.`);
-        } finally {
-             if (button) {
-                 button.textContent = 'Export Markdown';
-                 button.disabled = false;
-             }
-        }
-    }
-
-    /**
-     * Creates and returns the export button element.
-     * @returns {HTMLButtonElement}
-     */
-    function createExportButton() {
-        const button = document.createElement('button');
-        button.id = 'simplified-markdown-exporter-button';
-        button.textContent = 'Export Markdown';
-
-        // Basic styling to match the page's aesthetic
-        button.className = 'btn relative btn-neutral';
-        button.style.margin = '0 8px'; // Add some space
-
-        button.addEventListener('click', handleExport);
-        return button;
-    }
-
-    /**
-     * Injects the button into the page when the target element is available.
-     */
-    function initialize() {
-        // Use SentinelJS to wait for the prompt form's action buttons to appear
-        sentinel.on('form > div > div:last-child > div', (div) => {
-            // Check if the button is already there to prevent duplicates
-            if (document.getElementById('simplified-markdown-exporter-button')) {
-                return;
-            }
-            // Add the button next to the "Regenerate" button
-            div.appendChild(createExportButton());
-        });
-    }
-
-    initialize();
+  init();
 })();
