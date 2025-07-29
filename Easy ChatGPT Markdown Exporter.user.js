@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Simple ChatGPT Markdown Exporter
+// @name         Easy ChatGPT Markdown Exporter
 // @namespace    https://github.com/NoahTheGinger/Userscripts/
 // @version      1.4
 // @description  Export ChatGPT conversations (incl. thoughts, tool calls & custom instructions) to clean Markdown.
