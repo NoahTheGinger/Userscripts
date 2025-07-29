@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Easy ChatGPT Markdown Exporter
 // @namespace    https://github.com/NoahTheGinger/Userscripts/
-// @version      1.5
+// @version      1.5.2
 // @description  Export ChatGPT conversations (incl. thoughts, tool calls & custom instructions) to clean Markdown.
 // @author       NoahTheGinger
-// @note         Original development assistance from Gemini 2.5 Pro in AI Studio, and a large logic fix for tool calls by o3 (high reasoning effort) in OpenAI's Chat Playground
+// @note         Original development assistance from Gemini 2.5 Pro in AI Studio, and a large logic fix for tool calls by o3 (high reasoning effort) in OpenAI's Chat Playground, and button logic fixed by Grok 4 via API
 // @match        https://chat.openai.com/*
 // @match        https://chatgpt.com/*
 // @grant        none
@@ -12,264 +12,246 @@
 // @license      MIT
 // ==/UserScript==
 
-(function() {
-    'use strict';
+(function () {
+  "use strict";
 
-    /* ---------- 1. authentication & fetch ---------- */
+  /* ---------- 1. authentication & fetch ---------- */
 
-    async function getAccessToken() {
-        const r = await fetch("/api/auth/session");
-        if (!r.ok) throw new Error("Not authorised – log-in again");
-        const j = await r.json();
-        if (!j.accessToken) throw new Error("No access token");
-        return j.accessToken;
+  async function getAccessToken() {
+    const r = await fetch("/api/auth/session");
+    if (!r.ok) throw new Error("Not authorised – log-in again");
+    const j = await r.json();
+    if (!j.accessToken) throw new Error("No access token");
+    return j.accessToken;
+  }
+
+  function getChatIdFromUrl() {
+    const m = location.pathname.match(/\/c\/([a-zA-Z0-9-]+)/);
+    return m ? m[1] : null;
+  }
+
+  async function fetchConversation(id) {
+    const token = await getAccessToken();
+    const resp = await fetch(`${location.origin}/backend-api/conversation/${id}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (!resp.ok) throw new Error(resp.statusText);
+    return resp.json();
+  }
+
+  /* ---------- 2. processing & markdown ---------- */
+
+  function processConversation(raw) {
+    const title = raw.title || "ChatGPT Conversation";
+    const nodes = [];
+    let cur = raw.current_node;
+    while (cur) {
+      const n = raw.mapping[cur];
+      if (n && n.message && n.message.author?.role !== "system") nodes.unshift(n);
+      cur = n?.parent;
     }
+    return { title, nodes };
+  }
 
-    function getChatIdFromUrl() {
-        const m = location.pathname.match(/\/c\/([a-zA-Z0-9-]+)/);
-        return m ? m[1] : null;
-    }
+  /* message --> markdown */
+  function transformMessage(msg) {
+    if (!msg || !msg.content) return "";
+    const { content, metadata, author } = msg;
 
-    async function fetchConversation(id) {
-        const token = await getAccessToken();
-        const resp = await fetch(`${location.origin}/backend-api/conversation/${id}`, {
-            headers: { Authorization: `Bearer ${token}` }
-        });
-        if (!resp.ok) throw new Error(resp.statusText);
-        return resp.json();
-    }
+    switch (content.content_type) {
+      case "text":
+        return content.parts?.join("\n") || "";
 
-    /* ---------- 2. processing & markdown ---------- */
+      case "code": { // tool-call or normal snippet
+        const raw = content.text || "";
+        const looksJson = raw.trim().startsWith("{") && raw.trim().endsWith("}");
+        const lang =
+          content.language ||
+          metadata?.language ||
+          (looksJson ? "json" : "") ||
+          "txt";
 
-    function processConversation(raw) {
-        const title = raw.title || "ChatGPT Conversation";
-        const nodes = [];
-        let cur = raw.current_node;
-        while (cur) {
-            const n = raw.mapping[cur];
-            if (n && n.message && n.message.author?.role !== "system") nodes.unshift(n);
-            cur = n?.parent;
-        }
-        return { title, nodes };
-    }
+        const header = looksJson ? "**Tool Call:**\n" : "";
+        return `${header}\`\`\`${lang}\n${raw}\n\`\`\``;
+      }
 
-    /* message --> markdown */
-    function transformMessage(msg) {
-        if (!msg || !msg.content) return "";
-        const { content, metadata } = msg;
+      case "thoughts":
+        return content.thoughts
+          .map(
+            t =>
+              `**${t.summary}**\n\n> ${t.content.replace(/\n/g, "\n> ")}`
+          )
+          .join("\n\n");
 
-        switch (content.content_type) {
-            case "text":
-                return content.parts?.join("\n") || "";
-
-            case "code": { // tool-call or normal snippet
-                const raw = content.text || "";
-                const looksJson = raw.trim().startsWith("{") && raw.trim().endsWith("}");
-                const lang =
-                    content.language ||
-                    metadata?.language ||
-                    (looksJson ? "json" : "") ||
-                    "txt";
-
-                const header = looksJson ? "**Tool Call:**\n" : "";
-                return `${header}\`\`\`${lang}\n${raw}\n\`\`\``;
-            }
-
-            case "thoughts":
-                return content.thoughts
-                    .map(
-                        t =>
-                        `**${t.summary}**\n\n> ${t.content.replace(/\n/g, "\n> ")}`
-                    )
-                    .join("\n\n");
-
-            case "multimodal_text":
-                return (
-                    content.parts
-                    ?.map(p => {
-                        if (typeof p === "string") return p;
-                        if (p.content_type === "image_asset_pointer") return "![Image]";
-                        if (p.content_type === "code")
-                            return `\`\`\`\n${p.text || ""}\n\`\`\``;
-                        return `[Unsupported: ${p.content_type}]`;
-                    })
-                    .join("\n") || ""
-                );
-
-                /* noise we always skip */
-            case "model_editable_context":
-            case "reasoning_recap":
-                return "";
-            default:
-                return `[Unsupported content type: ${content.content_type}]`;
-        }
-    }
-
-    /* whole conversation --> markdown */
-    function conversationToMarkdown({ title, nodes }) {
-        let md = `# ${title}\n\n`;
-
-        /* prepend custom instructions (user_editable_context) --------- */
-        const idx = nodes.findIndex(
-            n => n.message?.content?.content_type === "user_editable_context"
+      case "multimodal_text":
+        return (
+          content.parts
+            ?.map(p => {
+              if (typeof p === "string") return p;
+              if (p.content_type === "image_asset_pointer") return "![Image]";
+              if (p.content_type === "code")
+                return `\`\`\`\n${p.text || ""}\n\`\`\``;
+              return `[Unsupported: ${p.content_type}]`;
+            })
+            .join("\n") || ""
         );
-        if (idx > -1) {
-            const ctx = nodes[idx].message.content;
-            md += "### User Editable Context:\n\n";
-            if (ctx.user_profile)
-                md += `**About User:**\n\`\`\`\n${ctx.user_profile}\n\`\`\`\n\n`;
-            if (ctx.user_instructions)
-                md += `**About GPT:**\n\`\`\`\n${ctx.user_instructions}\n\`\`\`\n\n`;
-            md += "---\n\n";
-            nodes.splice(idx, 1); // remove so we don’t re-process it
-        }
 
-        /* main loop --------------------------------------------------- */
-        for (let i = 0; i < nodes.length;) {
-            const n = nodes[i];
-            const m = n.message;
-            if (!m || m.recipient !== "all") {
-                i++;
-                continue;
-            }
+      /* noise we always skip */
+      case "model_editable_context":
+      case "reasoning_recap":
+        return "";
+      default:
+        return `[Unsupported content type: ${content.content_type}]`;
+    }
+  }
 
-            if (m.author.role === "user") {
-                md += `### User:\n\n${transformMessage(m)}\n\n---\n\n`;
-                i++;
-                continue;
-            }
+  /* whole conversation --> markdown */
+  function conversationToMarkdown({ title, nodes }) {
+    let md = `# ${title}\n\n`;
 
-            if (m.author.role === "assistant") {
-                /* gather reasoning (thoughts & tool-call code) ------------- */
-                if (m.content.content_type !== "text") {
-                    md += "### Thoughts:\n\n";
-                    while (
-                        i < nodes.length &&
-                        ["assistant", "tool"].includes(nodes[i].message.author.role) &&
-                        nodes[i].message.content.content_type !== "text"
-                    ) {
-                        const chunk = transformMessage(nodes[i].message);
-                        if (chunk) md += `${chunk}\n\n`;
-                        i++;
-                    }
-                    md += "---\n\n";
-                    continue;
-                }
+    /* prepend custom instructions (user_editable_context) --------- */
+    const idx = nodes.findIndex(
+      n => n.message?.content?.content_type === "user_editable_context"
+    );
+    if (idx > -1) {
+      const ctx = nodes[idx].message.content;
+      md += "### User Editable Context:\n\n";
+      if (ctx.user_profile)
+        md += `**About User:**\n\`\`\`\n${ctx.user_profile}\n\`\`\`\n\n`;
+      if (ctx.user_instructions)
+        md += `**About GPT:**\n\`\`\`\n${ctx.user_instructions}\n\`\`\`\n\n`;
+      md += "---\n\n";
+      nodes.splice(idx, 1); // remove so we don’t re-process it
+    }
 
-                /* final assistant reply ------------------------------------ */
-                md += `### ChatGPT:\n\n${transformMessage(m)}\n\n---\n\n`;
-                i++;
-                continue;
-            }
+    /* main loop --------------------------------------------------- */
+    for (let i = 0; i < nodes.length; ) {
+      const n = nodes[i];
+      const m = n.message;
+      if (!m || m.recipient !== "all") {
+        i++;
+        continue;
+      }
 
-            /* tool messages that slipped through and weren’t handled */
-            if (m.author.role === "tool") {
-                const chunk = transformMessage(m);
-                if (chunk) md += `### Thoughts:\n\n${chunk}\n\n---\n\n`;
-            }
+      if (m.author.role === "user") {
+        md += `### User:\n\n${transformMessage(m)}\n\n---\n\n`;
+        i++;
+        continue;
+      }
+
+      if (m.author.role === "assistant") {
+        /* gather reasoning (thoughts & tool-call code) ------------- */
+        if (m.content.content_type !== "text") {
+          md += "### Thoughts:\n\n";
+          while (
+            i < nodes.length &&
+            ["assistant", "tool"].includes(nodes[i].message.author.role) &&
+            nodes[i].message.content.content_type !== "text"
+          ) {
+            const chunk = transformMessage(nodes[i].message);
+            if (chunk) md += `${chunk}\n\n`;
             i++;
+          }
+          md += "---\n\n";
+          continue;
         }
 
-        return md.trimEnd();
+        /* final assistant reply ------------------------------------ */
+        md += `### ChatGPT:\n\n${transformMessage(m)}\n\n---\n\n`;
+        i++;
+        continue;
+      }
+
+      /* tool messages that slipped through and weren’t handled */
+      if (m.author.role === "tool") {
+        const chunk = transformMessage(m);
+        if (chunk) md += `### Thoughts:\n\n${chunk}\n\n---\n\n`;
+      }
+      i++;
     }
 
+    return md.trimEnd();
+  }
 
-    /* ---------- 3. UI / download ---------- */
+  /* ---------- 3. UI / download ---------- */
 
-    const sanitizeFilename = s => s.replace(/[\/\\?<>:*|"]/g, "-");
+  const sanitizeFilename = s => s.replace(/[\/\\?<>:*|"]/g, "-");
 
-    function downloadFile(name, data) {
-        const url = URL.createObjectURL(
-            new Blob([data], { type: "text/markdown;charset=utf-8" })
-        );
-        const a = Object.assign(document.createElement("a"), {
-            href: url,
-            download: name
-        });
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
+  function downloadFile(name, data) {
+    const url = URL.createObjectURL(
+      new Blob([data], { type: "text/markdown;charset=utf-8" })
+    );
+    const a = Object.assign(document.createElement("a"), {
+      href: url,
+      download: name
+    });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  /* export action */
+  async function handleExport() {
+    const btn = document.getElementById("simplified-markdown-exporter-button");
+    if (btn) {
+      btn.textContent = "Exporting...";
+      btn.disabled = true;
     }
-
-    /* export action */
-    async function handleExport() {
-        const btn = document.getElementById("easy-markdown-exporter-button");
-        if (btn) {
-            btn.textContent = "Exporting...";
-            btn.disabled = true;
-            btn.style.cursor = 'not-allowed';
-            btn.style.opacity = '0.5';
-        }
-        try {
-            const id = getChatIdFromUrl();
-            if (!id) {
-                alert("Cannot export: No conversation ID found in URL.");
-                return;
-            };
-            const raw = await fetchConversation(id);
-            const md = conversationToMarkdown(processConversation(raw));
-            downloadFile(`${sanitizeFilename(raw.title)}.md`, md);
-        } catch (e) {
-            console.error(e);
-            alert("Export failed – see browser console for details.");
-        } finally {
-            if (btn) {
-                btn.textContent = "Export Markdown";
-                btn.disabled = false;
-                btn.style.cursor = 'pointer';
-                btn.style.opacity = '1';
-            }
-        }
+    try {
+      const id = getChatIdFromUrl();
+      if (!id) return alert("No conversation ID found.");
+      const raw = await fetchConversation(id);
+      const md = conversationToMarkdown(processConversation(raw));
+      downloadFile(`${sanitizeFilename(raw.title)}.md`, md);
+    } catch (e) {
+      console.error(e);
+      alert("Export failed – see console.");
+    } finally {
+      if (btn) {
+        btn.textContent = "Export";
+        btn.disabled = false;
+      }
     }
+  }
 
-    /* button */
-    function createButton() {
-        const button = document.createElement("button");
-        button.id = "easy-markdown-exporter-button";
-        button.textContent = "Export Markdown";
+  /* button */
+  function createButton() {
+    const b = document.createElement("button");
+    b.id = "simplified-markdown-exporter-button";
+    b.textContent = "Export";
+    b.className = "btn relative btn-neutral rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-150";
+    b.style.backgroundColor = "var(--bg-elevated-secondary)";
+    b.style.border = "1px solid var(--border-light)";
+    b.style.cursor = "pointer";
+    b.style.display = "inline-flex";
+    b.style.alignItems = "center";
+    b.style.justifyContent = "center";
+    b.style.lineHeight = "1.5";
+    b.addEventListener("click", handleExport);
+    return b;
+  }
 
-        // Apply styles for a cleaner, more integrated look
-        Object.assign(button.style, {
-            backgroundColor: 'var(--token-main-surface-secondary)',
-            color: 'var(--token-text-primary)',
-            border: '1px solid var(--token-border-medium)',
-            borderRadius: '8px',
-            padding: '7px 12px',
-            fontSize: '14px',
-            cursor: 'pointer',
-            marginRight: '8px',
-            lineHeight: '1.25',
-            transition: 'background-color 0.2s ease-in-out',
-        });
+  function init() {
+    // This selector targets the container for the buttons on the right side of the composer.
+    sentinel.on("div[data-testid='composer-trailing-actions'] > .ms-auto", (buttonContainer) => {
+      if (document.getElementById("simplified-markdown-exporter-button")) {
+        return;
+      }
 
-        // Add hover effects for better user feedback
-        button.addEventListener('mouseover', () => {
-            if (!button.disabled) {
-                button.style.backgroundColor = 'var(--token-surface-tertiary)';
-            }
-        });
-        button.addEventListener('mouseout', () => {
-            if (!button.disabled) {
-                button.style.backgroundColor = 'var(--token-main-surface-secondary)';
-            }
-        });
+      const newButton = createButton();
+      // The first element in this container is the dictate button's span.
+      const referenceNode = buttonContainer.firstChild;
 
-        button.addEventListener("click", handleExport);
-        return button;
-    }
+      if (referenceNode) {
+        // Insert our button before the first existing button.
+        buttonContainer.insertBefore(newButton, referenceNode);
+      } else {
+        // Fallback if the container is somehow empty when found.
+        buttonContainer.appendChild(newButton);
+      }
+    });
+  }
 
-    function init() {
-        // SentinelJS waits for the composer's action buttons to appear and injects our button
-        sentinel.on('form [data-testid="composer-trailing-actions"]', (div) => {
-            // Check if our button is already there to prevent duplicates
-            if (document.getElementById("easy-markdown-exporter-button")) {
-                return;
-            }
-            // Add the button before the other actions (like the send button)
-            div.prepend(createButton());
-        });
-    }
-
-    init();
+  init();
 })();
