@@ -5,10 +5,8 @@
 // @description  Export ChatGPT conversations (incl. thoughts, tool calls & custom instructions) to clean Markdown.
 // @author       NoahTheGinger
 // @note         Original development assistance from Gemini 2.5 Pro in AI Studio, and a large logic fix for tool calls by o3 (high reasoning effort) in OpenAI's Chat Playground
-// @match        https://chat.openai.com/c/*
-// @match        https://chat.openai.com/g/*/c/*
-// @match        https://chatgpt.com/c/*
-// @match        https://chatgpt.com/g/*/c/*
+// @match        https://chat.openai.com/*
+// @match        https://chatgpt.com/*
 // @grant        none
 // @require      https://cdn.jsdelivr.net/npm/sentinel-js@0.0.7/dist/sentinel.min.js
 // @license      MIT
@@ -117,7 +115,7 @@
     );
     if (idx > -1) {
       const ctx = nodes[idx].message.content;
-      md += '#### User Editable Context:\n\n';
+      md += '### User Editable Context:\n\n';
       if (ctx.user_profile)
         md += `**About User:**\n\`\`\`\n${ctx.user_profile}\n\`\`\`\n\n`;
       if (ctx.user_instructions)
@@ -136,7 +134,7 @@
       }
 
       if (m.author.role === 'user') {
-        md += `#### User:\n\n${transformMessage(m)}\n\n---\n\n`;
+        md += `### User:\n\n${transformMessage(m)}\n\n---\n\n`;
         i++;
         continue;
       }
@@ -144,7 +142,7 @@
       if (m.author.role === 'assistant') {
         /* gather reasoning (thoughts & tool-call code) ------------- */
         if (m.content.content_type !== 'text') {
-          md += '#### Thoughts:\n\n';
+          md += '### Thoughts:\n\n';
           while (
             i < nodes.length &&
             ['assistant', 'tool'].includes(nodes[i].message.author.role) &&
@@ -159,7 +157,7 @@
         }
 
         /* final assistant reply ------------------------------------ */
-        md += `#### Assistant:\n\n${transformMessage(m)}\n\n---\n\n`;
+        md += `### ChatGPT:\n\n${transformMessage(m)}\n\n---\n\n`;
         i++;
         continue;
       }
@@ -167,7 +165,7 @@
       /* tool messages that slipped through and weren’t handled */
       if (m.author.role === 'tool') {
         const chunk = transformMessage(m);
-        if (chunk) md += `#### Thoughts:\n\n${chunk}\n\n---\n\n`;
+        if (chunk) md += `### Thoughts:\n\n${chunk}\n\n---\n\n`;
       }
       i++;
     }
