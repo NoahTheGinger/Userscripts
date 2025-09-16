@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Gemini Chat Markdown Exporter (Thoughts Included + Ordered)
+// @name         Gemini Chat Markdown Exporter (Thoughts Included)
 // @namespace    https://github.com/NoahTheGinger/Userscripts/
 // @version      0.3.2
 // @description  Export the current Gemini chat (/app/:chatId) to Markdown via internal batchexecute RPC, ordered oldest→newest, with Thoughts content only when present (Gemini 2.5 Pro).
