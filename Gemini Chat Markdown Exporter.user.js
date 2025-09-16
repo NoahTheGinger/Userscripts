@@ -1,12 +1,13 @@
 // ==UserScript==
-// @name         Gemini Chat Markdown Exporter (Thoughts Included + Ordered)
-// @namespace    https://github.com/NoahTheGinger/
-// @version      0.3.1
+// @name         Gemini Chat Markdown Exporter
+// @namespace    https://github.com/NoahTheGinger/Userscripts/
+// @version      0.3.2
 // @description  Export the current Gemini chat (/app/:chatId) to Markdown via internal batchexecute RPC, ordered oldest→newest, with Thoughts content only when present (Gemini 2.5 Pro).
 // @author       NoahTheGinger
 // @match        https://gemini.google.com/*
 // @grant        none
 // @run-at       document-end
+// @license      MIT
 // ==/UserScript==
 
 (function () {
@@ -15,12 +16,14 @@
   // ---------------------------
   // Utilities
   // ---------------------------
-  function $(sel, root = document) { return root.querySelector(sel); }
+  function $(sel, root = document) {
+    return root.querySelector(sel);
+  }
   function getCurrentTimestamp() {
     return new Date().toISOString().slice(0, 19).replace(/:/g, '-');
   }
   function sanitizeFilename(title) {
-    return (title || 'Gemini Chat').replace(/[<>:"/\\|?*]/g, '_').replace(/\s+/g, '_');
+    return (title || 'Gemini Chat').replace(/[<>:"/\\|?\*]/g, '_').replace(/\s+/g, '_');
   }
   function downloadFile(filename, mime, content) {
     const blob = content instanceof Blob ? content : new Blob([content], { type: mime });
@@ -54,7 +57,6 @@
     const html = document.documentElement.innerHTML;
     let m = html.match(/"SNlM0e":"([^"]+)"/);
     if (m) return m[1];
-
     try {
       if (window.WIZ_global_data?.SNlM0e) return window.WIZ_global_data.SNlM0e;
     } catch {}
@@ -62,7 +64,7 @@
   }
 
   // ---------------------------
-  // Batchexecute call
+  // Batchexecute calls
   // ---------------------------
   async function fetchConversationPayload(chatId) {
     const at = getAtToken();
@@ -75,19 +77,16 @@
         ["hNvQHb", innerArgs, null, "generic"]
       ]
     ];
-
     const params = new URLSearchParams({
       rpcids: 'hNvQHb',
       'source-path': `/app/${chatId}`,
       hl: getLang(),
       rt: 'c'
     });
-
     const body = new URLSearchParams({
       'f.req': JSON.stringify(fReq),
       at
     });
-
     const res = await fetch(`/_/BardChatUi/data/batchexecute?${params.toString()}`, {
       method: 'POST',
       headers: {
@@ -104,11 +103,82 @@
     return res.text();
   }
 
+  async function fetchConversationTitle(chatId) {
+    const at = getAtToken();
+    if (!at) return null;
+
+    try {
+      const fReq = [
+        [
+          ["MaZiqc", null, null, "generic"]
+        ]
+      ];
+      const params = new URLSearchParams({
+        rpcids: 'MaZiqc',
+        'source-path': `/app/${chatId}`,
+        hl: getLang(),
+        rt: 'c'
+      });
+      const body = new URLSearchParams({
+        'f.req': JSON.stringify(fReq),
+        at
+      });
+      const res = await fetch(`/_/BardChatUi/data/batchexecute?${params.toString()}`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+          'x-same-domain': '1',
+          'accept': '*/*'
+        },
+        body: body.toString() + '&'
+      });
+
+      if (!res.ok) return null;
+      const text = await res.text();
+      const payloads = parseBatchExecute(text, 'MaZiqc');
+
+      // Look for the conversation with our chatId
+      const fullChatId = chatId.startsWith('c_') ? chatId : `c_${chatId}`;
+      for (const payload of payloads) {
+        const convList = findConversationList(payload);
+        if (convList) {
+          for (const conv of convList) {
+            if (Array.isArray(conv) && conv[0] === fullChatId && typeof conv[1] === 'string') {
+              return conv[1];
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.log('[Gemini Exporter] Could not fetch title:', e);
+    }
+    return null;
+  }
+
+  function findConversationList(node) {
+    // MaZiqc response contains an array of conversations like:
+    // [["c_xxx", "Title", null, ...], ["c_yyy", "Another Title", ...], ...]
+    if (Array.isArray(node)) {
+      // Check if this looks like a conversation list
+      if (node.length > 0 && Array.isArray(node[0]) &&
+          typeof node[0][0] === 'string' && node[0][0].startsWith('c_') &&
+          typeof node[0][1] === 'string') {
+        return node;
+      }
+      // Recurse
+      for (const child of node) {
+        const result = findConversationList(child);
+        if (result) return result;
+      }
+    }
+    return null;
+  }
+
   // ---------------------------
   // Google batchexecute parser
   // ---------------------------
-  function parseBatchExecute(text) {
-    if (text.startsWith(")]}'")) {
+  function parseBatchExecute(text, targetRpcId = 'hNvQHb') {
+    if (text.startsWith(")]}'\n")) {
       const nl = text.indexOf('\n');
       text = nl >= 0 ? text.slice(nl + 1) : '';
     }
@@ -128,7 +198,7 @@
       }
       if (Array.isArray(segment)) {
         for (const entry of segment) {
-          if (Array.isArray(entry) && entry[0] === 'wrb.fr' && entry[1] === 'hNvQHb') {
+          if (Array.isArray(entry) && entry[0] === 'wrb.fr' && entry[1] === targetRpcId) {
             const s = entry[2];
             if (typeof s === 'string') {
               try {
@@ -204,15 +274,6 @@
     }
   }
 
-  // This flag was too broad (trips in Flash too); keep the function if you want, but we won’t use it anymore.
-  function hasReasoningFlag(assistantNode) {
-    if (!Array.isArray(assistantNode)) return false;
-    for (let k = 2; k < assistantNode.length; k++) {
-      if (assistantNode[k] === true) return true;
-    }
-    return false;
-  }
-
   function extractReasoningFromAssistantNode(assistantNode) {
     if (!Array.isArray(assistantNode)) return null;
     for (let k = assistantNode.length - 1; k >= 0; k--) {
@@ -243,11 +304,7 @@
   }
 
   function isTimestampPair(arr) {
-    return Array.isArray(arr) &&
-           arr.length === 2 &&
-           typeof arr[0] === 'number' &&
-           typeof arr[1] === 'number' &&
-           arr[0] > 1_600_000_000;
+    return Array.isArray(arr) && arr.length === 2 && typeof arr[0] === 'number' && typeof arr[1] === 'number' && arr[0] > 1_600_000_000;
   }
 
   function cmpTimestampAsc(a, b) {
@@ -273,15 +330,12 @@
         }
       }
     }
-
     if (userNode && assistantContainer) {
       const assistantNode = getAssistantNodeFromContainer(assistantContainer);
       if (!assistantNode) return null;
-
       const userText = getUserTextFromNode(userNode);
       const assistantText = getAssistantTextFromNode(assistantNode);
       const thoughtsText = extractReasoningFromAssistantNode(assistantNode);
-
       return {
         userText,
         assistantText,
@@ -314,7 +368,6 @@
       }
       for (const child of node) scan(child);
     }
-
     scan(root);
     return blocks;
   }
@@ -335,19 +388,31 @@
 
   // ---------------------------
   // Markdown formatter
-  // Only include Thoughts when actual thoughts text is present.
+  // With dividers between blocks
   // ---------------------------
   function blocksToMarkdown(blocks, title = 'Gemini Chat') {
     const parts = [];
-    for (const blk of blocks) {
+
+    for (let i = 0; i < blocks.length; i++) {
+      const blk = blocks[i];
       const u = (blk.userText || '').trim();
       const a = (blk.assistantText || '').trim();
       const t = (blk.thoughtsText || '').trim();
 
-      if (u) parts.push(`#### User:\n${u}`);
-      if (t) parts.push(`#### Thoughts:\n${t}`);
-      if (a) parts.push(`#### Assistant:\n${a}`);
+      const blockParts = [];
+      if (u) blockParts.push(`#### User:\n${u}`);
+      if (t) blockParts.push(`#### Thoughts:\n${t}`);
+      if (a) blockParts.push(`#### Assistant:\n${a}`);
+
+      if (blockParts.length > 0) {
+        parts.push(blockParts.join('\n\n'));
+        // Add divider after each block except the last one
+        if (i < blocks.length - 1) {
+          parts.push('---');
+        }
+      }
     }
+
     return `# ${title}\n\n${parts.join('\n\n')}\n`;
   }
 
@@ -374,8 +439,12 @@
       cursor: 'pointer',
       boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
     });
-    btn.onmouseenter = () => { btn.style.background = '#1558c0'; };
-    btn.onmouseleave = () => { btn.style.background = '#1a73e8'; };
+    btn.onmouseenter = () => {
+      btn.style.background = '#1558c0';
+    };
+    btn.onmouseleave = () => {
+      btn.style.background = '#1a73e8';
+    };
     btn.onclick = doExport;
     return btn;
   }
@@ -395,6 +464,8 @@
         alert('Open a chat at /app/:chatId before exporting.');
         return;
       }
+
+      // Fetch conversation data
       const raw = await fetchConversationPayload(chatId);
       const payloads = parseBatchExecute(raw);
       if (!payloads.length) throw new Error('No conversation payloads found in batchexecute response.');
@@ -402,7 +473,20 @@
       const blocks = extractAllBlocks(payloads);
       if (!blocks.length) throw new Error('Could not extract any User/Assistant message pairs.');
 
-      const title = document.title?.trim() || 'Gemini Chat';
+      // Try to fetch the actual conversation title
+      let title = await fetchConversationTitle(chatId);
+      if (!title) {
+        // Fallback to document title or default
+        title = document.title?.trim() || 'Gemini Chat';
+        // Remove common prefixes/suffixes
+        if (title.includes(' - Gemini')) {
+          title = title.split(' - Gemini')[0].trim();
+        }
+        if (title === 'Gemini' || title === 'Google Gemini') {
+          title = 'Gemini Chat';
+        }
+      }
+
       const md = stdLB(blocksToMarkdown(blocks, title));
       const filename = `${sanitizeFilename(title)}_${getCurrentTimestamp()}.md`;
       downloadFile(filename, 'text/markdown', md);
