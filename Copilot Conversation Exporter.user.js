@@ -495,7 +495,7 @@
     btn.textContent = 'Export';
     btn.title = 'Export conversation to Markdown or JSON';
     btn.style.cssText = `
-      position: fixed; top: 20px; right: 20px;
+      position: fixed; bottom: 20px; right: 20px;
       z-index: 2147483646;
       background: #10a37f; color: white;
       border: none; border-radius: 6px;
