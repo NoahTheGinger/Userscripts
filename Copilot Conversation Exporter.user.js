@@ -1,12 +1,13 @@
 // ==UserScript==
 // @name         Copilot Conversation Exporter
-// @namespace    https://github.com/NoahTheGinger/
+// @namespace    https://github.com/NoahTheGinger/Userscripts/
 // @version      2.0.0
-// @description  Export Microsoft Copilot conversations to Markdown or JSON
+// @description  Export Microsoft Copilot conversations to Markdown or JSON (optionally includes AI Thoughts when present)
 // @author       NoahTheGinger
 // @match        https://copilot.microsoft.com/*
 // @grant        none
 // @run-at       document-start
+// @license      MIT
 // ==/UserScript==
 
 (function () {
@@ -311,14 +312,14 @@
       // Assistant – we want Thoughts *before* the answer
       // -----------------------------------------------------------------
       if (authorLabel === 'Assistant') {
-        // 1️⃣  Thoughts (if any)
+        // 1. Thoughts (if any)
         if (hasThought) {
           lines.push('#### Thoughts');
           lines.push(thoughts);
           lines.push(''); // blank line after thoughts
         }
 
-        // 2️⃣  Assistant answer (if any)
+        // 2. Assistant answer (if any)
         if (hasBody) {
           lines.push(`#### ${authorLabel}:`);
           lines.push(body);
