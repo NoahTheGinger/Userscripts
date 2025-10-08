@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini Chat Markdown Exporter (Thoughts Included)
 // @namespace    https://github.com/NoahTheGinger/Userscripts/
-// @version      0.4.1
+// @version      0.4.2
 // @description  Export the current Gemini chat to Markdown via internal batchexecute RPC (with Thoughts content when present).
 // @author       NoahTheGinger
 // @match        https://gemini.google.com/*
@@ -44,30 +44,67 @@
     // Page state helpers
     // ---------------------------
     /**
-     * Detect route and build the correct source-path for batchexecute.
+     * Detect route and build the correct source-path and account-aware RPC base.
      * Supports:
      *   - /app/:chatId
      *   - /gem/:gemId/:chatId
+     *   - /u/:index/app/:chatId
+     *   - /u/:index/gem/:gemId/:chatId
      *
      * Returns:
-     *   { kind: 'app'|'gem', chatId: string, gemId?: string, sourcePath: string }
+     *   {
+     *     kind: 'app'|'gem',
+     *     chatId: string,
+     *     gemId?: string,
+     *     userIndex?: string,
+     *     basePrefix: '' | '/u/:index',
+     *     sourcePath: string
+     *   }
      * or null when not on a conversation page.
      */
     function getRouteFromUrl() {
-        const path = location.pathname.replace(/\/+$/, ''); // trim trailing slash
+        const path = location.pathname.replace(/\/+$/, ''); // trim trailing slash(es)
+        const segs = path.split('/').filter(Boolean);       // remove empty segments
+
+        if (segs.length === 0) return null;
+
+        let basePrefix = '';
+        let userIndex = null;
+        let i = 0;
+
+        // Optional "/u/:index" prefix
+        if (segs[0] === 'u' && /^\d+$/.test(segs[1] || '')) {
+            userIndex = segs[1];
+            basePrefix = `/u/${userIndex}`;
+            i = 2;
+        }
+
         // /app/:chatId
-        let m = path.match(/^\/app\/([a-z0-9_]+)/i);
-        if (m) {
-            const chatId = m[1];
-            return { kind: 'app', chatId, sourcePath: `/app/${chatId}` };
+        if (segs[i] === 'app' && segs[i + 1]) {
+            const chatId = segs[i + 1];
+            return {
+                kind: 'app',
+                chatId,
+                userIndex,
+                basePrefix,
+                sourcePath: `${basePrefix}/app/${chatId}`
+            };
         }
+
         // /gem/:gemId/:chatId
-        m = path.match(/^\/gem\/([a-z0-9]+)\/([a-z0-9_]+)/i);
-        if (m) {
-            const gemId = m[1];
-            const chatId = m[2];
-            return { kind: 'gem', gemId, chatId, sourcePath: `/gem/${gemId}/${chatId}` };
+        if (segs[i] === 'gem' && segs[i + 1] && segs[i + 2]) {
+            const gemId = segs[i + 1];
+            const chatId = segs[i + 2];
+            return {
+                kind: 'gem',
+                gemId,
+                chatId,
+                userIndex,
+                basePrefix,
+                sourcePath: `${basePrefix}/gem/${gemId}/${chatId}`
+            };
         }
+
         return null;
     }
 
@@ -87,6 +124,11 @@
         return null;
     }
 
+    function getBatchUrl(route) {
+        const prefix = route.basePrefix || '';
+        return `${prefix}/_/BardChatUi/data/batchexecute`;
+    }
+
     // ---------------------------
     // Batchexecute calls
     // ---------------------------
@@ -97,8 +139,9 @@
         const chatId = route.chatId;
         const convKey = chatId.startsWith('c_') ? chatId : `c_${chatId}`;
 
-        // Keep 1000 like before so large histories export in one go (works for /app and /gem).
-        const innerArgs = JSON.stringify([convKey, 1000, null, 1, [0], [4], null, 1]);
+        // Keep a large page size so long histories export in one go.
+        // Aligning shape with current RPC (5th arg [1]) but using 1000 for size.
+        const innerArgs = JSON.stringify([convKey, 1000, null, 1, [1], [4], null, 1]);
         const fReq = [[["hNvQHb", innerArgs, null, "generic"]]];
         const params = new URLSearchParams({
             rpcids: 'hNvQHb',
@@ -108,7 +151,7 @@
         });
         const body = new URLSearchParams({ 'f.req': JSON.stringify(fReq), at });
 
-        const res = await fetch(`/_/BardChatUi/data/batchexecute?${params.toString()}`, {
+        const res = await fetch(`${getBatchUrl(route)}?${params.toString()}`, {
             method: 'POST',
             headers: {
                 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
@@ -124,92 +167,73 @@
         return res.text();
     }
 
-	async function fetchConversationTitle(route) {
-		const at = getAtToken();
-		if (!at) return null;
+    async function fetchConversationTitle(route) {
+        const at = getAtToken();
+        if (!at) return null;
 
-		const fullChatId = route.chatId.startsWith('c_') ? route.chatId : `c_${route.chatId}`;
+        const fullChatId = route.chatId.startsWith('c_') ? route.chatId : `c_${route.chatId}`;
 
-		// Try the argument patterns we see in Gem pages first, then fallback.
-		const tryArgsList = [
-			JSON.stringify([13, null, [0, null, 1]]),  // what Gem pages use
-			JSON.stringify([200, null, [0, null, 1]]), // larger page size, helps if the chat is older
-			null                                       // legacy null-args (works for /app in many cases)
-		];
+        // Try the argument patterns we see in Gem pages first, then fallback.
+        const tryArgsList = [
+            JSON.stringify([13, null, [0, null, 1]]),  // what Gem pages use
+            JSON.stringify([200, null, [0, null, 1]]), // larger page size, helps if the chat is older
+            null                                       // legacy null-args (works for /app in many cases)
+        ];
 
-		for (const innerArgs of tryArgsList) {
-			try {
-				const fReq = [[["MaZiqc", innerArgs, null, "generic"]]];
-				const params = new URLSearchParams({
-					rpcids: 'MaZiqc',
-					'source-path': route.sourcePath,
-					hl: getLang(),
-					rt: 'c'
-				});
-				const body = new URLSearchParams({ 'f.req': JSON.stringify(fReq), at });
+        for (const innerArgs of tryArgsList) {
+            try {
+                const fReq = [[["MaZiqc", innerArgs, null, "generic"]]];
+                const params = new URLSearchParams({
+                    rpcids: 'MaZiqc',
+                    'source-path': route.sourcePath,
+                    hl: getLang(),
+                    rt: 'c'
+                });
+                const body = new URLSearchParams({ 'f.req': JSON.stringify(fReq), at });
 
-				const res = await fetch(`/_/BardChatUi/data/batchexecute?${params.toString()}`, {
-					method: 'POST',
-					headers: {
-						'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
-						'x-same-domain': '1',
-						'accept': '*/*'
-					},
-					body: body.toString() + '&'
-				});
+                const res = await fetch(`${getBatchUrl(route)}?${params.toString()}`, {
+                    method: 'POST',
+                    headers: {
+                        'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                        'x-same-domain': '1',
+                        'accept': '*/*'
+                    },
+                    body: body.toString() + '&'
+                });
 
-				if (!res.ok) continue;
+                if (!res.ok) continue;
 
-				const text = await res.text();
-				const payloads = parseBatchExecute(text, 'MaZiqc');
+                const text = await res.text();
+                const payloads = parseBatchExecute(text, 'MaZiqc');
 
-				// Robust scan: look anywhere in the payloads for ["c_xxx","Title",...]
-				for (const payload of payloads) {
-					const title = findTitleInPayload(payload, fullChatId);
-					if (title) return title;
-				}
-			} catch {
-				// Try next argument pattern
-			}
-		}
-		return null;
-	}
-
-	function findTitleInPayload(root, fullChatId) {
-		let found = null;
-		(function walk(node) {
-			if (found) return;
-			if (Array.isArray(node)) {
-				// Direct match: ["c_...", "Title", ...]
-				if (node.length >= 2 &&
-					typeof node[0] === 'string' &&
-					node[0] === fullChatId &&
-					typeof node[1] === 'string' &&
-					node[1].trim()) {
-					found = node[1].trim();
-					return;
-				}
-				for (const child of node) walk(child);
-			}
-		})(root);
-		return found;
-	}
-
-    function findConversationList(node) {
-        // MaZiqc response contains an array of conversations like:
-        // [["c_xxx", "Title", null, ...], ["c_yyy", "Another Title", ...], ...]
-        if (Array.isArray(node)) {
-            if (node.length > 0 && Array.isArray(node[0]) &&
-                typeof node[0][0] === 'string' && node[0][0].startsWith('c_') &&
-                typeof node[0][1] === 'string') {
-                return node;
-            }
-            for (const child of node) {
-                const result = findConversationList(child);
-                if (result) return result;
+                for (const payload of payloads) {
+                    const title = findTitleInPayload(payload, fullChatId);
+                    if (title) return title;
+                }
+            } catch {
+                // Try next argument pattern
             }
         }
         return null;
+    }
+
+    function findTitleInPayload(root, fullChatId) {
+        let found = null;
+        (function walk(node) {
+            if (found) return;
+            if (Array.isArray(node)) {
+                if (node.length >= 2 &&
+                    typeof node[0] === 'string' &&
+                    node[0] === fullChatId &&
+                    typeof node[1] === 'string' &&
+                    node[1].trim()) {
+                    found = node[1].trim();
+                    return;
+                }
+                for (const child of node) walk(child);
+            }
+        })(root);
+        return found;
     }
 
     // ---------------------------
@@ -511,7 +535,6 @@
             if (!title) {
                 // Fallback to document title or default
                 title = document.title?.trim() || 'Gemini Chat';
-                // Remove common prefixes/suffixes
                 if (title.includes(' - Gemini')) {
                     title = title.split(' - Gemini')[0].trim();
                 }
