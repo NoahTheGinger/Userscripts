@@ -336,7 +336,7 @@
     // Conversation extraction
     // More resilient against Gemini payload shape drift
     // ---------------------------
-    const EXPORTER_DEBUG = true;
+    const EXPORTER_DEBUG = false;
 
     function collectStrings(node, out = []) {
         if (typeof node === 'string') {
