@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Gemini Chat Markdown Exporter (Thoughts Included)
 // @namespace    https://github.com/NoahTheGinger/Userscripts/
-// @version      0.4.2
+// @version      0.4.3
 // @description  Export the current Gemini chat to Markdown via internal batchexecute RPC (with Thoughts content when present).
 // @author       NoahTheGinger
 // @match        https://gemini.google.com/*
@@ -19,25 +19,34 @@
     function $(sel, root = document) {
         return root.querySelector(sel);
     }
+
     function getCurrentTimestamp() {
         return new Date().toISOString().slice(0, 19).replace(/:/g, '-');
     }
+
     function sanitizeFilename(title) {
-        return (title || 'Gemini Chat').replace(/[<>:"/\\|?\*]/g, '_').replace(/\s+/g, '_');
+        return (title || 'Gemini Chat')
+            .replace(/[<>:"/\\|?*]/g, '_')
+            .replace(/\s+/g, '_');
     }
+
     function downloadFile(filename, mime, content) {
         const blob = content instanceof Blob ? content : new Blob([content], { type: mime });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
+
         a.href = url;
         a.download = filename;
+
         document.body.appendChild(a);
         a.click();
         a.remove();
+
         URL.revokeObjectURL(url);
     }
+
     function stdLB(text) {
-        return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        return String(text || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     }
 
     // ---------------------------
@@ -63,8 +72,8 @@
      * or null when not on a conversation page.
      */
     function getRouteFromUrl() {
-        const path = location.pathname.replace(/\/+$/, ''); // trim trailing slash(es)
-        const segs = path.split('/').filter(Boolean);       // remove empty segments
+        const path = location.pathname.replace(/\/+$/, '');
+        const segs = path.split('/').filter(Boolean);
 
         if (segs.length === 0) return null;
 
@@ -72,7 +81,7 @@
         let userIndex = null;
         let i = 0;
 
-        // Optional "/u/:index" prefix
+        // Optional "/u/:index" prefix.
         if (segs[0] === 'u' && /^\d+$/.test(segs[1] || '')) {
             userIndex = segs[1];
             basePrefix = `/u/${userIndex}`;
@@ -111,6 +120,7 @@
     function getLang() {
         return document.documentElement.lang || 'en';
     }
+
     function getAtToken() {
         const input = $('input[name="at"]');
         if (input?.value) return input.value;
@@ -118,9 +128,15 @@
         const html = document.documentElement.innerHTML;
         let m = html.match(/"SNlM0e":"([^"]+)"/);
         if (m) return m[1];
+
         try {
-            if (window.WIZ_global_data?.SNlM0e) return window.WIZ_global_data.SNlM0e;
-        } catch {}
+            if (window.WIZ_global_data?.SNlM0e) {
+                return window.WIZ_global_data.SNlM0e;
+            }
+        } catch {
+            // ignore
+        }
+
         return null;
     }
 
@@ -134,25 +150,33 @@
     // ---------------------------
     async function fetchConversationPayload(route) {
         const at = getAtToken();
-        if (!at) throw new Error('Could not find anti-CSRF token "at" on the page.');
+        if (!at) {
+            throw new Error('Could not find anti-CSRF token "at" on the page.');
+        }
 
         const chatId = route.chatId;
         const convKey = chatId.startsWith('c_') ? chatId : `c_${chatId}`;
 
         // Keep a large page size so long histories export in one go.
-        // Aligning shape with current RPC (5th arg [1]) but using 1000 for size.
+        // Aligning shape with current RPC: [convKey, pageSize, null, 1, [1], [4], null, 1]
         const innerArgs = JSON.stringify([convKey, 1000, null, 1, [1], [4], null, 1]);
-        const fReq = [[["hNvQHb", innerArgs, null, "generic"]]];
+        const fReq = [[['hNvQHb', innerArgs, null, 'generic']]];
+
         const params = new URLSearchParams({
             rpcids: 'hNvQHb',
             'source-path': route.sourcePath,
             hl: getLang(),
             rt: 'c'
         });
-        const body = new URLSearchParams({ 'f.req': JSON.stringify(fReq), at });
+
+        const body = new URLSearchParams({
+            'f.req': JSON.stringify(fReq),
+            at
+        });
 
         const res = await fetch(`${getBatchUrl(route)}?${params.toString()}`, {
             method: 'POST',
+            credentials: 'same-origin',
             headers: {
                 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
                 'x-same-domain': '1',
@@ -160,10 +184,15 @@
             },
             body: body.toString() + '&'
         });
+
         if (!res.ok) {
             const t = await res.text().catch(() => '');
-            throw new Error(`batchexecute failed: ${res.status} ${res.statusText}${t ? `\n${t.slice(0, 300)}` : ''}`);
+            throw new Error(
+                `batchexecute failed: ${res.status} ${res.statusText}` +
+                `${t ? `\n${t.slice(0, 300)}` : ''}`
+            );
         }
+
         return res.text();
     }
 
@@ -173,26 +202,32 @@
 
         const fullChatId = route.chatId.startsWith('c_') ? route.chatId : `c_${route.chatId}`;
 
-        // Try the argument patterns we see in Gem pages first, then fallback.
+        // Try the argument patterns seen in Gem pages first, then fallback.
         const tryArgsList = [
-            JSON.stringify([13, null, [0, null, 1]]),  // what Gem pages use
-            JSON.stringify([200, null, [0, null, 1]]), // larger page size, helps if the chat is older
-            null                                       // legacy null-args (works for /app in many cases)
+            JSON.stringify([13, null, [0, null, 1]]),
+            JSON.stringify([200, null, [0, null, 1]]),
+            null
         ];
 
         for (const innerArgs of tryArgsList) {
             try {
-                const fReq = [[["MaZiqc", innerArgs, null, "generic"]]];
+                const fReq = [[['MaZiqc', innerArgs, null, 'generic']]];
+
                 const params = new URLSearchParams({
                     rpcids: 'MaZiqc',
                     'source-path': route.sourcePath,
                     hl: getLang(),
                     rt: 'c'
                 });
-                const body = new URLSearchParams({ 'f.req': JSON.stringify(fReq), at });
+
+                const body = new URLSearchParams({
+                    'f.req': JSON.stringify(fReq),
+                    at
+                });
 
                 const res = await fetch(`${getBatchUrl(route)}?${params.toString()}`, {
                     method: 'POST',
+                    credentials: 'same-origin',
                     headers: {
                         'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
                         'x-same-domain': '1',
@@ -211,28 +246,35 @@
                     if (title) return title;
                 }
             } catch {
-                // Try next argument pattern
+                // Try next argument pattern.
             }
         }
+
         return null;
     }
 
     function findTitleInPayload(root, fullChatId) {
         let found = null;
+
         (function walk(node) {
             if (found) return;
+
             if (Array.isArray(node)) {
-                if (node.length >= 2 &&
+                if (
+                    node.length >= 2 &&
                     typeof node[0] === 'string' &&
                     node[0] === fullChatId &&
                     typeof node[1] === 'string' &&
-                    node[1].trim()) {
+                    node[1].trim()
+                ) {
                     found = node[1].trim();
                     return;
                 }
+
                 for (const child of node) walk(child);
             }
         })(root);
+
         return found;
     }
 
@@ -244,208 +286,522 @@
             const nl = text.indexOf('\n');
             text = nl >= 0 ? text.slice(nl + 1) : '';
         }
+
         const lines = text.split('\n').filter(l => l.trim().length > 0);
         const payloads = [];
 
-        for (let i = 0; i < lines.length; ) {
+        for (let i = 0; i < lines.length;) {
             const lenStr = lines[i++];
             const len = parseInt(lenStr, 10);
+
+            // Google batchexecute normally uses length-prefixed JSON lines.
+            // We do not need the length value, but checking it helps keep alignment.
             if (!isFinite(len)) break;
+
             const jsonLine = lines[i++] || '';
             let segment;
+
             try {
                 segment = JSON.parse(jsonLine);
             } catch {
                 continue;
             }
+
             if (Array.isArray(segment)) {
                 for (const entry of segment) {
-                    if (Array.isArray(entry) && entry[0] === 'wrb.fr' && entry[1] === targetRpcId) {
+                    if (
+                        Array.isArray(entry) &&
+                        entry[0] === 'wrb.fr' &&
+                        entry[1] === targetRpcId
+                    ) {
                         const s = entry[2];
+
                         if (typeof s === 'string') {
                             try {
                                 const inner = JSON.parse(s);
                                 payloads.push(inner);
                             } catch {
-                                // ignore
+                                // ignore malformed inner payload
                             }
                         }
                     }
                 }
             }
         }
+
         return payloads;
     }
 
     // ---------------------------
-    // Conversation extraction (block-based, with Thoughts)
+    // Conversation extraction
+    // More resilient against Gemini payload shape drift
     // ---------------------------
-    function isUserMessageNode(node) {
-        return (
-            Array.isArray(node) &&
-            node.length >= 2 &&
-            Array.isArray(node[0]) &&
-            node[0].length >= 1 &&
-            node[0].every(p => typeof p === 'string') &&
-            (node[1] === 2 || node[1] === 1)
-        );
+    const EXPORTER_DEBUG = true;
+
+    function collectStrings(node, out = []) {
+        if (typeof node === 'string') {
+            out.push(node);
+        } else if (Array.isArray(node)) {
+            for (const child of node) {
+                collectStrings(child, out);
+            }
+        }
+
+        return out;
+    }
+
+    function cleanStrings(node) {
+        return collectStrings(node)
+            .map(s => s.trim())
+            .filter(Boolean);
+    }
+
+    function looksLikeInternalId(s) {
+        return /^(?:c_|rc_|r_)[A-Za-z0-9_-]{6,}$/.test(String(s || '').trim());
+    }
+
+    function isUserMessageNode(node, loose = false) {
+        if (!Array.isArray(node)) return false;
+        if (node.length < 2) return false;
+        if (!Array.isArray(node[0])) return false;
+        if (typeof node[1] !== 'number') return false;
+
+        // Strict mode matches known user role markers.
+        // Loose mode is only used as a fallback.
+        if (!loose && node[1] !== 1 && node[1] !== 2) return false;
+        if (loose && (node[1] < 0 || node[1] > 9)) return false;
+
+        return cleanStrings(node[0]).some(Boolean);
     }
 
     function getUserTextFromNode(userNode) {
         try {
-            return userNode[0].join('\n');
+            return cleanStrings(userNode[0])
+                .filter(s => !looksLikeInternalId(s))
+                .join('\n')
+                .trim();
         } catch {
             return '';
         }
     }
 
+    function looksLikeAssistantId(id) {
+        if (typeof id !== 'string') return false;
+
+        return (
+            id.startsWith('rc_') ||
+            id.startsWith('r_') ||
+            /^response[_-]/i.test(id)
+        );
+    }
+
     function isAssistantNode(node) {
-        return (
-            Array.isArray(node) &&
-            node.length >= 2 &&
-            typeof node[0] === 'string' &&
-            node[0].startsWith('rc_') &&
-            Array.isArray(node[1]) &&
-            typeof node[1][0] === 'string'
-        );
-    }
+        if (!Array.isArray(node)) return false;
+        if (node.length < 2) return false;
+        if (typeof node[0] !== 'string') return false;
+        if (!Array.isArray(node[1])) return false;
 
-    function isAssistantContainer(node) {
-        return (
-            Array.isArray(node) &&
-            node.length >= 1 &&
-            Array.isArray(node[0]) &&
-            node[0].length >= 1 &&
-            isAssistantNode(node[0][0])
-        );
-    }
+        if (looksLikeAssistantId(node[0])) return true;
 
-    function getAssistantNodeFromContainer(container) {
-        try {
-            return container[0][0];
-        } catch {
-            return null;
-        }
+        // Fallback shape: some response-ish nodes may not use rc_,
+        // but still have a substantial markdown/text payload at [1][0].
+        const direct = typeof node[1]?.[0] === 'string' ? node[1][0].trim() : '';
+
+        return (
+            direct.length > 20 &&
+            /[\s\n.,!?`*_#]/.test(direct) &&
+            !looksLikeInternalId(node[0]) &&
+            !node[0].startsWith('c_')
+        );
     }
 
     function getAssistantTextFromNode(assistantNode) {
         try {
-            return assistantNode[1][0] || '';
+            const primary = assistantNode?.[1]?.[0];
+
+            if (typeof primary === 'string') {
+                return primary;
+            }
+
+            if (Array.isArray(primary)) {
+                const joined = cleanStrings(primary)
+                    .filter(s => !looksLikeInternalId(s))
+                    .join('\n\n')
+                    .trim();
+
+                if (joined) return joined;
+            }
+
+            // Last-ditch fallback for changed/nested response payloads.
+            return cleanStrings(assistantNode?.[1] || [])
+                .filter(s => !looksLikeInternalId(s))
+                .join('\n\n')
+                .trim();
         } catch {
             return '';
         }
     }
 
-    function extractReasoningFromAssistantNode(assistantNode) {
+    function findThoughtCandidate(node) {
+        if (!Array.isArray(node)) return null;
+
+        // Preserve the known Thoughts shape from the original script.
+        if (
+            node.length >= 2 &&
+            Array.isArray(node[1]) &&
+            node[1].length >= 1 &&
+            Array.isArray(node[1][0]) &&
+            node[1][0].length >= 1 &&
+            node[1][0].every(x => typeof x === 'string')
+        ) {
+            const txt = node[1][0].join('\n\n').trim();
+            if (txt) return txt;
+        }
+
+        if (
+            Array.isArray(node[0]) &&
+            node[0].length >= 1 &&
+            node[0].every(x => typeof x === 'string')
+        ) {
+            const txt = node[0].join('\n\n').trim();
+            if (txt) return txt;
+        }
+
+        // Search from the end first because Thoughts-like metadata tends
+        // to live after the main assistant response.
+        for (let i = node.length - 1; i >= 0; i--) {
+            const found = findThoughtCandidate(node[i]);
+            if (found) return found;
+        }
+
+        return null;
+    }
+
+    function extractReasoningFromAssistantNode(assistantNode, assistantText = '') {
         if (!Array.isArray(assistantNode)) return null;
-        for (let k = assistantNode.length - 1; k >= 0; k--) {
-            const child = assistantNode[k];
-            if (Array.isArray(child)) {
-                if (
-                    child.length >= 2 &&
-                    Array.isArray(child[1]) &&
-                    child[1].length >= 1 &&
-                    Array.isArray(child[1][0]) &&
-                    child[1][0].length >= 1 &&
-                    child[1][0].every(x => typeof x === 'string')
-                ) {
-                    const txt = child[1][0].join('\n\n').trim();
-                    if (txt) return txt;
-                }
-                if (
-                    Array.isArray(child[0]) &&
-                    child[0].length >= 1 &&
-                    child[0].every(x => typeof x === 'string')
-                ) {
-                    const txt = child[0].join('\n\n').trim();
-                    if (txt) return txt;
-                }
+
+        const normalize = s => stdLB(String(s || '')).trim();
+        const assistantNorm = normalize(assistantText);
+
+        // Avoid scanning [0] id and [1] main answer first.
+        for (let k = assistantNode.length - 1; k >= 2; k--) {
+            const txt = findThoughtCandidate(assistantNode[k]);
+
+            if (txt && normalize(txt) !== assistantNorm) {
+                return txt;
             }
         }
+
         return null;
     }
 
     function isTimestampPair(arr) {
-        return Array.isArray(arr) && arr.length === 2 && typeof arr[0] === 'number' && typeof arr[1] === 'number' && arr[0] > 1_600_000_000;
+        return (
+            Array.isArray(arr) &&
+            arr.length === 2 &&
+            typeof arr[0] === 'number' &&
+            typeof arr[1] === 'number' &&
+            arr[0] > 1_600_000_000
+        );
     }
 
     function cmpTimestampAsc(a, b) {
         if (!a.tsPair && !b.tsPair) return 0;
         if (!a.tsPair) return -1;
         if (!b.tsPair) return 1;
-        if (a.tsPair[0] !== b.tsPair[0]) return a.tsPair[0] - b.tsPair[0];
+
+        if (a.tsPair[0] !== b.tsPair[0]) {
+            return a.tsPair[0] - b.tsPair[0];
+        }
+
         return a.tsPair[1] - b.tsPair[1];
     }
 
-    function detectBlock(node) {
-        if (!Array.isArray(node)) return null;
-        let userNode = null;
-        let assistantContainer = null;
-        let tsCandidate = null;
+    function findAll(root, predicate, out = []) {
+        if (!Array.isArray(root)) return out;
 
-        for (const child of node) {
-            if (isUserMessageNode(child) && !userNode) userNode = child;
-            if (isAssistantContainer(child) && !assistantContainer) assistantContainer = child;
-            if (isTimestampPair(child)) {
-                if (!tsCandidate || child[0] > tsCandidate[0] || (child[0] === tsCandidate[0] && child[1] > tsCandidate[1])) {
-                    tsCandidate = child;
+        if (predicate(root)) out.push(root);
+
+        for (const child of root) {
+            findAll(child, predicate, out);
+        }
+
+        return out;
+    }
+
+    function findMaxTimestamp(root) {
+        let best = null;
+
+        (function walk(node) {
+            if (!Array.isArray(node)) return;
+
+            if (isTimestampPair(node)) {
+                if (
+                    !best ||
+                    node[0] > best[0] ||
+                    (node[0] === best[0] && node[1] > best[1])
+                ) {
+                    best = node;
+                }
+            }
+
+            for (const child of node) {
+                walk(child);
+            }
+        })(root);
+
+        return best;
+    }
+
+    function blockFromScope(scope, order, looseUser = false) {
+        const users = findAll(scope, n => isUserMessageNode(n, looseUser));
+        const assistants = findAll(scope, isAssistantNode);
+
+        if (!users.length || !assistants.length) return null;
+
+        const userNode = users[0];
+
+        // Prefer an assistant node with visible text, otherwise keep one
+        // with Thoughts content, otherwise first assistant-like node.
+        let assistantNode = assistants.find(a => getAssistantTextFromNode(a).trim());
+
+        if (!assistantNode) {
+            assistantNode = assistants.find(a => extractReasoningFromAssistantNode(a));
+        }
+
+        if (!assistantNode) {
+            assistantNode = assistants[0];
+        }
+
+        const userText = getUserTextFromNode(userNode);
+        const assistantText = getAssistantTextFromNode(assistantNode);
+        const thoughtsText = extractReasoningFromAssistantNode(assistantNode, assistantText);
+
+        if (!userText && !assistantText && !thoughtsText) return null;
+
+        return {
+            userText,
+            assistantText,
+            thoughtsText: thoughtsText || null,
+            tsPair: findMaxTimestamp(scope),
+            _order: order
+        };
+    }
+
+    function extractByTurnContainers(root, looseUser = false) {
+        const containers = [];
+
+        function scan(node) {
+            if (!Array.isArray(node)) {
+                return {
+                    hasUser: false,
+                    hasAssistant: false,
+                    hasBoth: false
+                };
+            }
+
+            const selfUser = isUserMessageNode(node, looseUser);
+            const selfAssistant = isAssistantNode(node);
+
+            let hasUser = selfUser;
+            let hasAssistant = selfAssistant;
+            let childHasBoth = false;
+
+            for (const child of node) {
+                const flags = scan(child);
+
+                hasUser = hasUser || flags.hasUser;
+                hasAssistant = hasAssistant || flags.hasAssistant;
+                childHasBoth = childHasBoth || flags.hasBoth;
+            }
+
+            const hasBoth = hasUser && hasAssistant;
+
+            // Minimal enclosing container: contains both a user and assistant,
+            // but none of its children already contains both.
+            if (hasBoth && !childHasBoth && !selfUser && !selfAssistant) {
+                containers.push(node);
+            }
+
+            return {
+                hasUser,
+                hasAssistant,
+                hasBoth
+            };
+        }
+
+        scan(root);
+
+        return containers
+            .map((scope, i) => blockFromScope(scope, i, looseUser))
+            .filter(Boolean);
+    }
+
+    function collectMessageNodes(root, looseUser = false, out = []) {
+        if (!Array.isArray(root)) return out;
+
+        if (isUserMessageNode(root, looseUser)) {
+            out.push({
+                kind: 'user',
+                node: root
+            });
+        } else if (isAssistantNode(root)) {
+            out.push({
+                kind: 'assistant',
+                node: root
+            });
+        }
+
+        for (const child of root) {
+            collectMessageNodes(child, looseUser, out);
+        }
+
+        return out;
+    }
+
+    function extractBySequentialWalk(root, looseUser = false) {
+        const items = collectMessageNodes(root, looseUser);
+        const blocks = [];
+        const pairedUsers = new WeakSet();
+
+        let currentUser = null;
+        let order = 0;
+
+        for (const item of items) {
+            if (item.kind === 'user') {
+                currentUser = item.node;
+                continue;
+            }
+
+            if (item.kind === 'assistant' && currentUser && !pairedUsers.has(currentUser)) {
+                const userText = getUserTextFromNode(currentUser);
+                const assistantText = getAssistantTextFromNode(item.node);
+                const thoughtsText = extractReasoningFromAssistantNode(item.node, assistantText);
+
+                if (userText || assistantText || thoughtsText) {
+                    blocks.push({
+                        userText,
+                        assistantText,
+                        thoughtsText: thoughtsText || null,
+                        tsPair: null,
+                        _order: order++
+                    });
+
+                    pairedUsers.add(currentUser);
                 }
             }
         }
-        if (userNode && assistantContainer) {
-            const assistantNode = getAssistantNodeFromContainer(assistantContainer);
-            if (!assistantNode) return null;
-            const userText = getUserTextFromNode(userNode);
-            const assistantText = getAssistantTextFromNode(assistantNode);
-            const thoughtsText = extractReasoningFromAssistantNode(assistantNode);
-            return {
-                userText,
-                assistantText,
-                thoughtsText: thoughtsText || null,
-                tsPair: tsCandidate || null
-            };
+
+        return blocks;
+    }
+
+    function dedupeBlocks(blocks) {
+        const seen = new Set();
+        const out = [];
+
+        for (const block of blocks) {
+            const key = JSON.stringify([
+                block.userText || '',
+                block.assistantText || '',
+                block.thoughtsText || '',
+                block.tsPair?.[0] || 0,
+                block.tsPair?.[1] || 0
+            ]);
+
+            if (!seen.has(key)) {
+                seen.add(key);
+                out.push(block);
+            }
         }
-        return null;
+
+        return out;
     }
 
     function extractBlocksFromPayloadRoot(root) {
-        const blocks = [];
-        const seenComposite = new Set();
+        const strictContainers = extractByTurnContainers(root, false);
+        const strictSequential = extractBySequentialWalk(root, false);
 
-        function scan(node) {
-            if (!Array.isArray(node)) return;
-            const block = detectBlock(node);
-            if (block) {
-                const key = JSON.stringify([
-                    block.userText,
-                    block.assistantText,
-                    block.thoughtsText || '',
-                    block.tsPair?.[0] || 0,
-                    block.tsPair?.[1] || 0
-                ]);
-                if (!seenComposite.has(key)) {
-                    seenComposite.add(key);
-                    blocks.push(block);
-                }
-            }
-            for (const child of node) scan(child);
+        // Container mode is more precise, but if it only found one giant
+        // conversation wrapper while sequential found many turns, use sequential.
+        if (
+            strictContainers.length &&
+            !(strictContainers.length === 1 && strictSequential.length > 1)
+        ) {
+            return strictContainers;
         }
-        scan(root);
-        return blocks;
+
+        if (strictSequential.length) {
+            return strictSequential;
+        }
+
+        // Fallback for changed user-role markers.
+        const looseContainers = extractByTurnContainers(root, true);
+        const looseSequential = extractBySequentialWalk(root, true);
+
+        if (
+            looseContainers.length &&
+            !(looseContainers.length === 1 && looseSequential.length > 1)
+        ) {
+            return looseContainers;
+        }
+
+        return looseSequential;
+    }
+
+    function collectExtractionDiagnostics(payloads) {
+        const d = {
+            payloadCount: payloads.length,
+            userNodesStrict: 0,
+            userNodesLoose: 0,
+            assistantNodes: 0,
+            timestampPairs: 0
+        };
+
+        function walk(node) {
+            if (!Array.isArray(node)) return;
+
+            if (isUserMessageNode(node, false)) d.userNodesStrict++;
+            if (isUserMessageNode(node, true)) d.userNodesLoose++;
+            if (isAssistantNode(node)) d.assistantNodes++;
+            if (isTimestampPair(node)) d.timestampPairs++;
+
+            for (const child of node) {
+                walk(child);
+            }
+        }
+
+        for (const p of payloads) {
+            walk(p);
+        }
+
+        return d;
     }
 
     function extractAllBlocks(payloads) {
         let blocks = [];
-        for (const p of payloads) {
-            const b = extractBlocksFromPayloadRoot(p);
-            blocks = blocks.concat(b);
+
+        for (let pIndex = 0; pIndex < payloads.length; pIndex++) {
+            const extracted = extractBlocksFromPayloadRoot(payloads[pIndex]);
+
+            blocks = blocks.concat(
+                extracted.map((b, i) => ({
+                    ...b,
+                    _payloadIndex: pIndex,
+                    _i: blocks.length + i
+                }))
+            );
         }
-        const withIndex = blocks.map((b, i) => ({ ...b, _i: i }));
-        withIndex.sort((a, b) => {
+
+        blocks = dedupeBlocks(blocks);
+
+        blocks.sort((a, b) => {
             const c = cmpTimestampAsc(a, b);
-            return c !== 0 ? c : a._i - b._i;
+            if (c !== 0) return c;
+
+            return (a._payloadIndex - b._payloadIndex) || (a._i - b._i);
         });
-        return withIndex.map(({ _i, ...rest }) => rest);
+
+        return blocks.map(({ _payloadIndex, _i, _order, ...rest }) => rest);
     }
 
     // ---------------------------
@@ -457,17 +813,28 @@
 
         for (let i = 0; i < blocks.length; i++) {
             const blk = blocks[i];
+
             const u = (blk.userText || '').trim();
             const a = (blk.assistantText || '').trim();
             const t = (blk.thoughtsText || '').trim();
 
             const blockParts = [];
-            if (u) blockParts.push(`#### User:\n${u}`);
-            if (t) blockParts.push(`#### Thoughts:\n${t}`);
-            if (a) blockParts.push(`#### Assistant:\n${a}`);
+
+            if (u) {
+                blockParts.push(`#### User:\n${u}`);
+            }
+
+            if (t) {
+                blockParts.push(`#### Thoughts:\n${t}`);
+            }
+
+            if (a) {
+                blockParts.push(`#### Assistant:\n${a}`);
+            }
 
             if (blockParts.length > 0) {
                 parts.push(blockParts.join('\n\n---\n\n'));
+
                 if (i < blocks.length - 1) {
                     parts.push('---');
                 }
@@ -482,9 +849,11 @@
     // ---------------------------
     function createExportButton() {
         const btn = document.createElement('button');
+
         btn.id = 'gemini-export-btn';
         btn.textContent = 'Export';
         btn.title = 'Export current Gemini chat to Markdown';
+
         Object.assign(btn.style, {
             position: 'fixed',
             bottom: '20px',
@@ -500,9 +869,17 @@
             cursor: 'pointer',
             boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
         });
-        btn.onmouseenter = () => { btn.style.background = '#1558c0'; };
-        btn.onmouseleave = () => { btn.style.background = '#1a73e8'; };
+
+        btn.onmouseenter = () => {
+            btn.style.background = '#1558c0';
+        };
+
+        btn.onmouseleave = () => {
+            btn.style.background = '#1a73e8';
+        };
+
         btn.onclick = doExport;
+
         return btn;
     }
 
@@ -517,27 +894,60 @@
     async function doExport() {
         try {
             const route = getRouteFromUrl();
+
             if (!route || !route.chatId) {
                 alert('Open a chat at /app/:chatId or /gem/:gemId/:chatId before exporting.');
                 return;
             }
 
-            // Fetch conversation data
+            // Fetch title in parallel so MaZiqc is no longer skipped merely
+            // because block extraction fails.
+            const titlePromise = fetchConversationTitle(route).catch(err => {
+                console.warn('[Gemini Exporter] Title fetch failed:', err);
+                return null;
+            });
+
             const raw = await fetchConversationPayload(route);
+            const titleFromRpc = await titlePromise;
+
             const payloads = parseBatchExecute(raw);
-            if (!payloads.length) throw new Error('No conversation payloads found in batchexecute response.');
-
+            const diagnostics = collectExtractionDiagnostics(payloads);
             const blocks = extractAllBlocks(payloads);
-            if (!blocks.length) throw new Error('Could not extract any User/Assistant message pairs.');
 
-            // Try to fetch the actual conversation title
-            let title = await fetchConversationTitle(route);
+            window.__geminiExporterDebug = {
+                route,
+                diagnostics,
+                payloadCount: payloads.length,
+                blockCount: blocks.length,
+                payloads,
+                blocks
+            };
+
+            if (EXPORTER_DEBUG) {
+                console.info('[Gemini Exporter] Diagnostics:', window.__geminiExporterDebug);
+            }
+
+            if (!payloads.length) {
+                throw new Error('No conversation payloads found in batchexecute response.');
+            }
+
+            if (!blocks.length) {
+                throw new Error(
+                    'Could not extract any User/Assistant message pairs. ' +
+                    `Diagnostics: ${JSON.stringify(diagnostics)}. ` +
+                    'Open DevTools and inspect window.__geminiExporterDebug.'
+                );
+            }
+
+            let title = titleFromRpc;
+
             if (!title) {
-                // Fallback to document title or default
                 title = document.title?.trim() || 'Gemini Chat';
+
                 if (title.includes(' - Gemini')) {
                     title = title.split(' - Gemini')[0].trim();
                 }
+
                 if (title === 'Gemini' || title === 'Google Gemini') {
                     title = 'Gemini Chat';
                 }
@@ -545,6 +955,7 @@
 
             const md = stdLB(blocksToMarkdown(blocks, title));
             const filename = `${sanitizeFilename(title)}_${getCurrentTimestamp()}.md`;
+
             downloadFile(filename, 'text/markdown', md);
         } catch (err) {
             console.error('[Gemini Exporter] Error:', err);
@@ -557,7 +968,9 @@
     // ---------------------------
     function init() {
         injectButton();
+
         let lastHref = location.href;
+
         setInterval(() => {
             if (location.href !== lastHref) {
                 lastHref = location.href;
@@ -565,6 +978,7 @@
             }
         }, 1000);
     }
+
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
