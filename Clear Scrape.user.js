@@ -15,6 +15,8 @@
 // @grant        GM.saveTab
 // @grant        GM.registerMenuCommand
 // @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/601802/Clear%20Scrape%20%E2%80%94%20intelligent%20page%20scraper.user.js
+// @updateURL https://update.greasyfork.org/scripts/601802/Clear%20Scrape%20%E2%80%94%20intelligent%20page%20scraper.meta.js
 // ==/UserScript==
 
 /* Clear Scrape 1.0.3 — original, dependency-free implementation. */
