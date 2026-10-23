@@ -24,6 +24,7 @@
   'use strict';
   const VERSION = 1;
   const PREFIX = 'clear-scrape:v1:';
+  const DISPLAY_KEY = PREFIX + 'display-hidden';
   const HOST_ID = 'clear-scrape-ui';
   const SKIP = 'script,style,noscript,template,svg,canvas,iframe,button,input,select,textarea,[hidden],[aria-hidden="true"]';
   const TABLE = 'table,[role="table"],[role="grid"],[role="treegrid"]';
@@ -790,9 +791,8 @@
     clearTimeout(highlightTimer);
     $('outline').hidden = true; $('hint').hidden = true;
     panelOpen = false; uiHidden = !uiHidden;
-    tabInfo.clearScrapeDisplayHidden = uiHidden;
     render();
-    await GM.saveTab(tabInfo);
+    await GM.setValue(DISPLAY_KEY, uiHidden);
   }
   function renderCandidates() {
     const select = $('regions');
@@ -869,7 +869,7 @@
   async function boot() {
     if (document.getElementById(HOST_ID)) return;
     tabInfo = await GM.getTab();
-    uiHidden = tabInfo.clearScrapeDisplayHidden === true;
+    uiHidden = await GM.getValue(DISPLAY_KEY, false) === true;
     tabKey = tabInfo.clearScrapeToken || (crypto.randomUUID ? crypto.randomUUID() : Date.now() + '-' + Math.random().toString(36).slice(2));
     tabInfo.clearScrapeToken = tabKey; await GM.saveTab(tabInfo);
     const stored = await GM.getValue(PREFIX + 'session:' + tabKey + ':' + location.origin, null);
