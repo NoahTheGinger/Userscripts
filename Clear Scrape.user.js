@@ -2,7 +2,7 @@
 // @name         Clear Scrape — intelligent page scraper
 // @namespace    https://github.com/NoahTheGinger/Userscripts
 // @author       NoahTheGinger & ChatGPT 6.1 Sol (Max)
-// @version      1.0.2
+// @version      1.0.3
 // @description  Detect tables and repeated cards, pick a region, crawl pagination, and export clean CSV, JSON, Markdown or HTML. No external services.
 // @match        http://*/*
 // @match        https://*/*
@@ -17,7 +17,7 @@
 // @license      MIT
 // ==/UserScript==
 
-/* Clear Scrape 1.0.2 — original, dependency-free implementation. */
+/* Clear Scrape 1.0.3 — original, dependency-free implementation. */
 (() => {
   'use strict';
   const VERSION = 1;
@@ -201,7 +201,7 @@
     return [...fields.values()];
   }
   function readCards(root, recipe, fields = null) {
-    let records = queryAll(root, recipe.rows || ':scope > *').filter(n => visible(n) && !n.matches(SKIP));
+    let records = (recipe.single ? [root] : queryAll(root, recipe.rows || ':scope > *')).filter(n => visible(n) && !n.matches(SKIP));
     if (recipe.rowTag) records = records.filter(n => n.localName === recipe.rowTag);
     const columns = fields || [...new Map([...(recipe.fields || []), ...cardFields(records)].map(f => [f.key, f])).values()];
     // Keep the original names when a temporarily absent field changes discovery order.
@@ -568,7 +568,7 @@
       }).join('') + '</dl></article>').join('\n');
       return { ext: 'html', mime: 'text/html;charset=utf-8', content: '<!doctype html>\n<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; style-src \'unsafe-inline\'; img-src \'none\'; base-uri \'none\'; form-action \'none\'"><title>' + esc(job.title) + '</title><style>'
         + 'body{margin:0;background:#f5f6fa;color:#182535;font:15px/1.6 system-ui,sans-serif}main{max-width:1080px;margin:auto;padding:56px 24px}.eyebrow,.number{font-size:11px;letter-spacing:.16em;font-weight:700;color:#4b66ae}h1{font-size:clamp(28px,5vw,44px);line-height:1.15;letter-spacing:-.04em;margin:12px 0}header p{color:#627087;margin:12px 0 32px}.records{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,420px),1fr));gap:20px}article{background:white;border:1px solid #e0e5ee;border-radius:16px;padding:28px;break-inside:avoid}h2{font-size:21px;line-height:1.3;margin:10px 0 22px;overflow-wrap:anywhere}dl{margin:0}dl>div{display:grid;grid-template-columns:minmax(100px,30%) minmax(0,1fr);gap:16px;border-top:1px solid #edf0f5;padding:11px 0}dt{color:#657289;font-size:13px}dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}a{color:#3156a6;text-underline-offset:3px}footer{margin-top:32px;color:#7a8596;font-size:12px}@media print{body{background:white}main{padding:0}.records{display:block}article{margin:0 0 18px}a{color:inherit}}'
-        + '</style></head><body><main><header><div class="eyebrow">CLEAR SCRAPE / COLLECTION</div><h1>' + esc(job.title) + '</h1><p>' + rows.length + ' records · Exported ' + esc(timestamp) + '</p></header><section class="records">' + cards + '</section><footer>Collected from ' + esc(job.origin) + ' · Clear Scrape 1.0.2</footer></main></body></html>\n' };
+        + '</style></head><body><main><header><div class="eyebrow">CLEAR SCRAPE / COLLECTION</div><h1>' + esc(job.title) + '</h1><p>' + rows.length + ' records · Exported ' + esc(timestamp) + '</p></header><section class="records">' + cards + '</section><footer>Collected from ' + esc(job.origin) + ' · Clear Scrape 1.0.3</footer></main></body></html>\n' };
     }
     throw new Error('Unknown export format.');
   }
@@ -611,7 +611,7 @@
       candidates = detect();
       renderCandidates();
       if (!job.recipe && candidates.length) choose(candidates[0]);
-      else { live = readRecipe(); job.message = candidates.length ? candidates.length + ' data regions found. Choose one below.' : 'No strong candidates found. Click Pick region and select an item.'; render(true); }
+      else { live = readRecipe(); job.message = candidates.length ? candidates.length + ' data regions found. Choose one below.' : 'No strong candidates found. Use Pick region for repeated records or Pick element for exact content.'; render(true); }
     }, 30);
   }
   function inferRegion(target) {
@@ -648,12 +648,21 @@
     }
     return choices.sort((a, b) => b.score - a.score)[0] || null;
   }
+  function pickedElement(target) {
+    if (!visible(target) || target === document.body || target === document.documentElement) return null;
+    const recipe = recipeFor(target, 'list', [target]);
+    recipe.single = true; recipe.rows = ':scope';
+    const data = readCards(target, recipe);
+    return data.rows.length ? { recipe, data, root: target, label: 'Selected element · ' + target.localName + (target.id ? ' #' + target.id : '') } : null;
+  }
   function pick(mode) {
-    if (job.status === 'running') return;
+    if (job.status === 'running' || uiHidden) return;
     pickerCleanup?.();
     const wasOpen = panelOpen; panelOpen = false; render(); $('launcher').hidden = true;
     $('hint').hidden = false;
-    $('hint').textContent = mode === 'next' ? 'Click Next / Load more on the page · Esc cancels' : 'Click one record or a table · ↑ selects parent · ↓ selects child · Esc cancels';
+    $('hint').textContent = mode === 'next' ? 'Click Next / Load more on the page · Esc cancels'
+      : mode === 'element' ? 'Click the exact content to scrape · ↑ selects parent · ↓ selects child · Esc cancels'
+      : 'Click one record or a table · ↑ selects parent · ↓ selects child · Esc cancels';
     let hovered = null, underPointer = null;
     const move = event => {
       if (event.composedPath().includes(host)) return;
@@ -677,14 +686,14 @@
         job.next = nextRecipe(target); job.message = 'Next control selected: ' + (controlLabel(target) || target.localName) + '.';
         save().catch(() => {}); render(); glow(target);
       } else {
-        const candidate = inferRegion(target);
+        const candidate = mode === 'element' ? pickedElement(target) : inferRegion(target);
         if (candidate) { candidates.unshift(candidate); choose(candidate); renderCandidates(); }
-        else { job.message = 'No repeated records around that element. Try a larger parent, or use CSS selectors in Advanced.'; render(); }
+        else { job.message = mode === 'element' ? 'No readable data in that element. Try selecting a text block or a larger parent.' : 'No repeated records around that element. Use Pick element to scrape exactly the content you click.'; render(); }
       }
     };
     const key = event => {
       if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); finish(); }
-      if (mode === 'region' && hovered && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
+      if (mode !== 'next' && hovered && ['ArrowUp', 'ArrowDown'].includes(event.key)) {
         event.preventDefault(); event.stopImmediatePropagation();
         if (event.key === 'ArrowUp' && hovered.parentElement) hovered = hovered.parentElement;
         if (event.key === 'ArrowDown') hovered = (hovered.contains(underPointer) && underPointer !== hovered ? [...hovered.children].find(n => n.contains(underPointer)) : hovered.firstElementChild) || hovered;
@@ -710,17 +719,17 @@
         <div id="stats"><div><strong id="rowCount">0</strong><span>RECORDS SAVED</span></div><div><strong id="pageCount">0</strong><span>PAGES</span></div><div><strong id="columnCount">0</strong><span>COLUMNS</span></div></div>
         <div id="content">
           <div class="section"><div class="row" style="margin-bottom:9px"><div class="eyebrow">YOUR COLLECTION</div><span class="tag" id="state">Ready</span></div><p id="status" role="status" aria-live="polite"></p></div>
-          <div class="section stack"><h2 style="margin:0"><span class="step">01</span>Find the right data</h2><div class="row"><button id="scan" class="grow">Detect data</button><button id="pickRegion">Pick region ↗</button></div><select id="regions" aria-label="Detected data regions"><option value="">Detect or pick a region</option></select><div class="row"><span id="regionInfo" class="muted grow">Tables, grids, lists &amp; repeated cards</span><button id="highlight" class="ghost small">Highlight</button></div></div>
+          <div class="section stack"><h2 style="margin:0"><span class="step">01</span>Find the right data</h2><button id="scan">Detect data</button><div class="row"><button id="pickRegion" class="grow">Pick region ↗</button><button id="pickElement" class="grow">Pick element ↗</button></div><div class="muted">Pick region finds a table or similar records. Pick element selects exactly the content you click.</div><select id="regions" aria-label="Detected data regions"><option value="">Detect or pick a region</option></select><div class="row"><span id="regionInfo" class="muted grow">Tables, grids, lists &amp; repeated cards</span><button id="highlight" class="ghost small">Highlight</button></div></div>
           <div class="section stack"><h2 style="margin:0"><span class="step">02</span>Collect &amp; crawl</h2><div class="row"><button id="autoNext" class="small">Auto Next</button><button id="pickNext" class="small">Pick Next ↗</button><span class="muted grow" id="nextInfo"></span></div><div class="row"><button id="capture" class="grow">Capture page</button><button id="start" class="primary">Start crawl</button><button id="pause" hidden>Pause</button></div><details><summary>Crawl settings</summary><div class="stack"><div class="two"><label>Delay between pages (ms)<input id="delay" type="number" min="200" step="100"></label><label>Page timeout (ms)<input id="timeout" type="number" min="3000" step="1000"></label><label>Maximum pages · 0 = all<input id="maxPages" type="number" min="0" step="1"></label><label>Maximum rows · 0 = all<input id="maxRows" type="number" min="0" step="1"></label></div><label class="check"><input type="checkbox" id="dedupe">Skip identical records</label><label class="check"><input type="checkbox" id="links">Include link URL columns</label><label class="check"><input type="checkbox" id="images">Include image URL columns</label><div class="muted">Keep this tab open. Delay and timeout can be increased for slower pages.</div></div></details></div>
           <div class="section stack"><div class="row"><h2 class="grow" style="margin:0"><span class="step">03</span>Review the collection</h2><span id="previewLabel"></span></div><div id="previewWrap"><div id="previewEmpty">Choose a region to preview its records.</div></div><div class="row"><button id="previewPrev" class="small" aria-label="Previous preview page">←</button><button id="previewNext" class="small" aria-label="Next preview page">→</button><span class="muted grow">8 records per preview</span><button id="clear" class="ghost small danger">Clear results</button></div><details><summary>Choose &amp; rename columns</summary><div id="columns"></div></details></div>
           <div class="section stack"><h2 style="margin:0"><span class="step">04</span>Take it with you</h2><label>File name<input id="filename" type="text" spellcheck="false"></label><div class="row"><select id="format" class="grow" aria-label="Export format"><option value="csv">CSV · Excel friendly</option><option value="json">JSON · records array</option><option value="md">Markdown · record sections</option><option value="html">HTML · styled record cards</option></select><button id="export" class="primary">Download</button></div><label class="check"><input id="provenance" type="checkbox">Include source URL &amp; page</label><label class="check"><input id="csvSafe" type="checkbox">Protect CSV cells from spreadsheet formulas</label><label class="check"><input id="autoDownload" type="checkbox">Download automatically when crawl finishes</label></div>
           <div class="section"><details><summary>Advanced · CSS selectors &amp; recovery</summary><div class="stack"><label>Region CSS selector<input id="rootCSS" type="text" placeholder="#results or table.data" spellcheck="false"></label><label>Repeated row selector · relative to region<input id="rowCSS" type="text" placeholder=":scope > article.card" spellcheck="false"></label><button id="applyCSS">Use selectors</button><button id="recover">Recover last saved run on this site</button><div id="notice">Extraction reads rendered DOM content. Virtualized grids expose only mounted rows. Closed shadow roots and embedded frames are outside this script's scope.</div></div></details></div>
-        </div><div id="bottom"><span>LOCAL EXTRACTION · NO API KEY</span><span>Alt + Shift + S &nbsp; / &nbsp; v1.0.2</span></div>
+        </div><div id="bottom"><span>LOCAL EXTRACTION · NO API KEY</span><span>Alt + Shift + S &nbsp; / &nbsp; v1.0.3</span></div>
       </section><div id="outline" hidden></div><div id="hint" hidden></div>`;
     document.documentElement.append(host);
     const on = (id, event, fn) => $(id).addEventListener(event, async e => { try { await fn(e); } catch (error) { job.message = error.message; render(); } });
     on('launcher', 'click', () => toggle()); on('minimize', 'click', () => toggle(false));
-    on('scan', 'click', scan); on('pickRegion', 'click', () => pick('region')); on('pickNext', 'click', () => pick('next'));
+    on('scan', 'click', scan); on('pickRegion', 'click', () => pick('region')); on('pickElement', 'click', () => pick('element')); on('pickNext', 'click', () => pick('next'));
     on('regions', 'change', e => { const item = candidates[Number(e.target.value)]; if (item) choose(item); });
     on('highlight', 'click', () => { const data = readRecipe(); if (data) { data.root.scrollIntoView({ block: 'center', behavior: 'smooth' }); setTimeout(() => glow(data.root), 350); } });
     on('autoNext', 'click', async () => { job.next = { mode: 'auto' }; job.message = resolveNext() ? 'Automatic Next detection enabled.' : 'No obvious Next control found. Use Pick Next.'; await save(); render(); });
@@ -756,7 +765,8 @@
       const recipe = recipeFor(root, kind);
       if (kind === 'list') {
         recipe.rows = $('rowCSS').value.trim() || ':scope > *';
-        let rows; try { rows = [...root.querySelectorAll(recipe.rows)]; } catch { throw new Error('Invalid row CSS selector.'); }
+        recipe.single = recipe.rows === ':scope';
+        let rows; try { rows = recipe.single ? [root] : [...root.querySelectorAll(recipe.rows)]; } catch { throw new Error('Invalid row CSS selector.'); }
         recipe.rowTag = ''; recipe.fields = cardFields(rows);
       }
       recipe.roots = [selector];
@@ -829,14 +839,14 @@
     $('state').textContent = ({ idle: 'Ready', running: 'Collecting', paused: 'Paused', done: 'Finished' })[job.status] || 'Ready';
     $('status').textContent = job.message;
     const running = job.status === 'running';
-    for (const id of ['scan', 'regions', 'pickRegion', 'pickNext', 'autoNext', 'applyCSS', 'clear', 'recover', 'links', 'images', 'dedupe']) $(id).disabled = running;
+    for (const id of ['scan', 'regions', 'pickRegion', 'pickElement', 'pickNext', 'autoNext', 'applyCSS', 'clear', 'recover', 'links', 'images', 'dedupe']) $(id).disabled = running;
     $('start').hidden = running; $('pause').hidden = !running;
     $('start').disabled = !job.recipe || busy; $('capture').disabled = running || !job.recipe || busy;
     $('start').textContent = job.status === 'paused' ? 'Resume crawl' : 'Start crawl';
     $('export').disabled = !job.records.length;
     const next = resolveNext(); $('nextInfo').textContent = next ? (disabled(next) ? 'Disabled: ' : 'Ready: ') + (controlLabel(next) || next.localName) : 'No Next found';
     $('nextInfo').title = $('nextInfo').textContent;
-    $('regionInfo').textContent = job.recipe ? (job.recipe.kind === 'list' ? 'Repeated records' : job.recipe.kind === 'aria' ? 'ARIA table / grid' : 'HTML table') + (live ? ' · ' + live.rows.length + ' visible records' : ' · saved selector') : 'Tables, grids, lists & repeated cards';
+    $('regionInfo').textContent = job.recipe ? (job.recipe.single ? 'Selected element' : job.recipe.kind === 'list' ? 'Repeated records' : job.recipe.kind === 'aria' ? 'ARIA table / grid' : 'HTML table') + (live ? ' · ' + live.rows.length + ' visible records' : ' · saved selector') : 'Tables, grids, lists & repeated cards';
     if (full) {
       for (const id of ['delay', 'timeout', 'maxPages', 'maxRows']) $(id).value = job.options[id];
       for (const id of ['dedupe', 'links', 'images', 'provenance', 'csvSafe', 'autoDownload']) $(id).checked = job.options[id];
