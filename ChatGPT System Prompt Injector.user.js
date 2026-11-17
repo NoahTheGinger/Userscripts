@@ -9,6 +9,8 @@
 // @run-at       document-start
 // @grant        none
 // @license      MIT
+// @downloadURL https://update.greasyfork.org/scripts/605986/ChatGPT%20System%20Prompt%20Injector.user.js
+// @updateURL https://update.greasyfork.org/scripts/605986/ChatGPT%20System%20Prompt%20Injector.meta.js
 // ==/UserScript==
 
 (() => {
