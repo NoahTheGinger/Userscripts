@@ -3,7 +3,7 @@
 // @namespace    https://github.com/NoahTheGinger
 // @author       NoahTheGinger & Gemini 4 Hydrogen & Claude 5.5 Opus
 // @version      1.3.3
-// @description  Injects a custom prompt (system by default) once per ChatGPT conversation (and again if you change it mid-chat) and tracks presence in history. Draggable panel; right-click the button to reset its position.
+// @description  Inject a REAL, custom system/developer prompt in your ChatGPT conversations!
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
 // @run-at       document-start
