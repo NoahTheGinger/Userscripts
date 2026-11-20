@@ -2,7 +2,7 @@
 // @name         ChatGPT System Prompt Injector
 // @namespace    https://github.com/NoahTheGinger
 // @author       NoahTheGinger & Gemini 4 Hydrogen & Claude 5.5 Opus
-// @version      1.3.2
+// @version      1.3.3
 // @description  Injects a custom prompt (system by default) once per ChatGPT conversation (and again if you change it mid-chat) and tracks presence in history. Draggable panel; right-click the button to reset its position.
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -995,6 +995,35 @@
         shadow.appendChild(style);
     }
 
+    function setPanelOpen(open) {
+        if (!ui || ui.panel.hidden === !open)
+            return;
+        ui.panel.hidden = !open;
+        layout(open);
+    }
+
+    // Pressing anywhere outside the widget closes an open panel. Uses the capture
+    // phase so the page can't swallow the event first, and doesn't cancel it, so
+    // the press still reaches whatever was clicked. Listening for pointerdown
+    // (not click) means a text selection that starts inside the panel and is
+    // released outside it doesn't count.
+    function closePanelOnOutsidePress(e) {
+        if (!ui || ui.panel.hidden || e.composedPath().includes(ui.host))
+            return;
+        setPanelOpen(false);
+    }
+
+    // Presses inside iframes (canvas previews and the like) never reach this
+    // document, but they do move focus into the iframe, which blurs the window.
+    // Switching to another app also blurs the window, which is why this checks
+    // where focus went instead of closing on every blur.
+    function closePanelOnIframeFocus() {
+        setTimeout(() => {
+            if (document.activeElement instanceof HTMLIFrameElement)
+                setPanelOpen(false);
+        }, 0);
+    }
+
     function mountUI() {
         if (!document.body || document.getElementById(HOST_ID))
             return;
@@ -1074,8 +1103,7 @@
         toggleBtn.addEventListener('click', () => {
             if (clickFollowsDrag())
                 return;
-            panel.hidden = !panel.hidden;
-            layout(!panel.hidden);
+            setPanelOpen(panel.hidden);
         });
 
         toggleBtn.addEventListener('contextmenu', (e) => {
@@ -1137,6 +1165,8 @@
         mountUI();
         watchTheme();
         window.addEventListener('resize', () => queueLayout(true));
+        document.addEventListener('pointerdown', closePanelOnOutsidePress, true);
+        window.addEventListener('blur', closePanelOnIframeFocus);
         const obs = new MutationObserver(() => {
             if (!document.getElementById(HOST_ID))
                 mountUI();
